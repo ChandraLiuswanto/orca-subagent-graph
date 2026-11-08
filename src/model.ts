@@ -17,9 +17,6 @@ export type Row = {
   release_state: string | null
   terminal_handle: string | null
   objective: string | null
-  task_id: string | null
-  /** Orca workspace, '<worktreeId>::<absolute path>' (or just a path). */
-  workspace: string | null
 }
 
 /** running: still working. idle: finished, terminal still open. done: finished and closed. */
@@ -28,8 +25,6 @@ export type Phase = 'running' | 'idle' | 'done' | 'failed'
 export type Node = {
   id: string
   host: string
-  taskId: string | null
-  workspace: string | null
   title: string
   agent: string | null
   model: string | null
@@ -50,27 +45,6 @@ export type Run = {
   createdAt: string
   counts: Record<Phase, number>
   roots: Node[]
-  /** Workspace of the root worker (earliest worker with no creator). */
-  workspace: string | null
-  /** Project key: host + path (see projectKey). */
-  project: string
-  /** Latest completed_at among the run's workers, ms; null when none settled. */
-  endedAt: number | null
-  /** Latest created_at / completed_at among the run's workers, ms. */
-  lastActivityAt: number
-  /** Worker nodes (follow-ups folded) and deepest nesting level. */
-  workers: number
-  depth: number
-}
-
-export type Project = {
-  key: string
-  host: string
-  path: string | null
-  label: string
-  counts: Record<Phase, number>
-  lastActivityAt: number
-  runs: Run[]
 }
 
 export type Snapshot = {
@@ -125,7 +99,6 @@ export function buildRuns(rows: Row[], open: (row: Row) => boolean | undefined =
   const runs = new Map<string, Run>()
   const parentOf = new Map<string, string | null>()
   const runOfNode = new Map<string, string>()
-  const rootSeen = new Set<string>()
 
   for (const row of rows) {
     const key = k(row.host, rootOf(row.host, row.id))
@@ -135,8 +108,6 @@ export function buildRuns(rows: Row[], open: (row: Row) => boolean | undefined =
       node = {
         id: rootOf(row.host, row.id),
         host: row.host,
-        taskId: row.task_id,
-        workspace: row.workspace,
         title: row.title || row.id,
         agent: row.agent,
         model: row.model,
@@ -169,26 +140,9 @@ export function buildRuns(rows: Row[], open: (row: Row) => boolean | undefined =
         coordinator: row.host === 'local' ? 'main agent' : `main agent on ${row.host}`,
         createdAt: row.created_at,
         counts: zero(),
-        roots: [],
-        workspace: null,
-        project: projectKey(row.host, null),
-        endedAt: null,
-        lastActivityAt: NaN,
-        workers: 0,
-        depth: 0
+        roots: []
       })
     }
-    const run = runs.get(rk)!
-    // Rows are oldest first, so the first creator-less, non-follow-up row is the root worker.
-    if (!rootSeen.has(rk) && !row.creator_dispatch_id && !row.follow_up_of_dispatch_id) {
-      rootSeen.add(rk)
-      run.workspace = row.workspace
-    } else if (!rootSeen.has(rk) && run.workspace === null) {
-      run.workspace = row.workspace // fallback until a root shows up
-    }
-    const done = toMs(row.completed_at)
-    if (isFinite(done)) run.endedAt = Math.max(run.endedAt ?? done, done)
-    for (const t of [toMs(row.created_at), done]) if (isFinite(t)) run.lastActivityAt = isFinite(run.lastActivityAt) ? Math.max(run.lastActivityAt, t) : t
   }
 
   for (const [key, node] of nodes) {
@@ -201,17 +155,11 @@ export function buildRuns(rows: Row[], open: (row: Row) => boolean | undefined =
   const totals = { ...zero(), maxDepth: 0 }
   const walk = (n: Node, depth: number, run: Run): void => {
     run.counts[n.phase] += 1
-    run.workers += 1
-    run.depth = Math.max(run.depth, depth)
     totals[n.phase] += 1
     totals.maxDepth = Math.max(totals.maxDepth, depth)
     for (const c of n.children) walk(c, depth + 1, run)
   }
-  for (const run of runs.values()) {
-    for (const r of run.roots) walk(r, 1, run)
-    run.project = projectKey(run.host, pathOf(run.workspace))
-    if (!isFinite(run.lastActivityAt)) run.lastActivityAt = 0
-  }
+  for (const run of runs.values()) for (const r of run.roots) walk(r, 1, run)
 
   const list = [...runs.values()].sort((a, b) => toMs(b.createdAt) - toMs(a.createdAt))
   return { at: now, runs: list, totals, hosts: [...new Set(rows.map((r) => r.host))] }
@@ -224,127 +172,17 @@ export function chip(s: Snapshot): { visible: boolean; text?: string; tone?: 'ne
   if (live === 0) return { visible: false }
   const parts = [`${s.totals.running} running`, `${s.totals.idle} idle`]
   if (s.totals.maxDepth > 1) parts.push(`nested ${s.totals.maxDepth} deep`)
-  const head = `Orca workers: ${parts.join(', ')}.`
-  const tail = ' Open the Subagents panel for the graph.'
-  const busy = groupProjects(s.runs).filter((p) => p.counts.running + p.counts.idle > 0)
-  let by = busy.slice(0, 3).map((p) => `${p.label} ${p.counts.running + p.counts.idle}`).join(', ')
-  if (busy.length > 3) by += `, +${busy.length - 3} more`
-  let tooltip = head + (by ? ` By project: ${by}.` : '') + tail
-  if (tooltip.length > 256) tooltip = (head + (by ? ` By project: ${by}.` : '')).slice(0, 255) + '…'
   return {
     visible: true,
     text: `${live} subagent${live === 1 ? '' : 's'}`,
     tone: s.totals.running > 0 ? 'accent' : 'neutral',
-    tooltip
+    tooltip: `Orca workers: ${parts.join(', ')}. Open the Subagents panel for the graph.`.slice(0, 256)
   }
 }
 
-/** How long a finished run stays in Live. */
-export const RECENT_MS = 60 * 60 * 1000
-
-const isLive = (r: Run) => r.counts.running + r.counts.idle > 0
-
-/**
- * Live view: runs with a running/idle worker plus runs that finished within RECENT_MS, for every
- * project. When that is empty, each project's newest run, so Live is never blank.
- */
-export function liveRuns(runs: Run[], now = Date.now()): Run[] {
-  const recent = (r: Run) => (r.endedAt ?? r.lastActivityAt) >= now - RECENT_MS
-  let out = runs.filter((r) => isLive(r) || recent(r))
-  if (!out.length) {
-    const newest = new Map<string, Run>()
-    for (const r of runs) {
-      const cur = newest.get(r.project)
-      if (!cur || toMs(r.createdAt) > toMs(cur.createdAt)) newest.set(r.project, r)
-    }
-    out = [...newest.values()]
-  }
-  return out.sort((a, b) => toMs(b.createdAt) - toMs(a.createdAt))
-}
-
-/** Workspace '<worktreeId>::<path>' -> path; no '::' means the whole string is the path. */
-export function pathOf(workspace: string | null): string | null {
-  if (!workspace) return null
-  const i = workspace.indexOf('::')
-  return (i >= 0 ? workspace.slice(i + 2) : workspace) || null
-}
-
-export function projectKey(host: string, path: string | null): string {
-  return host + '\u0000' + (path ?? '')
-}
-
-const segments = (p: string) => p.split(/[\\/]+/).filter(Boolean)
-
-/**
- * Labels: the path's last segment; projects that share it get the shortest suffix that tells
- * them apart ("main" vs "surface-probe/main"). The same path on two hosts keeps one label (the
- * host pill tells them apart). An empty last segment ("/") falls back to the full path.
- */
-export function projectLabels(list: { key: string; path: string | null }[]): Map<string, string> {
-  const out = new Map<string, string>()
-  const suffix = (p: string, n: number) => segments(p).slice(-n).join('/')
-  const groups = new Map<string, { key: string; path: string }[]>()
-  for (const it of list) {
-    if (it.path === null) { out.set(it.key, 'Unknown project'); continue }
-    const base = suffix(it.path, 1)
-    if (!base) { out.set(it.key, it.path); continue }
-    groups.set(base, [...(groups.get(base) ?? []), { key: it.key, path: it.path }])
-  }
-  for (const group of groups.values()) {
-    for (const it of group) {
-      const others = group.filter((o) => o.path !== it.path)
-      const max = segments(it.path).length
-      let n = 1
-      while (n < max && others.some((o) => suffix(o.path, n) === suffix(it.path, n))) n++
-      out.set(it.key, suffix(it.path, n))
-    }
-  }
-  return out
-}
-
-const runRank = (r: Run) => (isLive(r) ? 0 : r.counts.failed > 0 ? 1 : 2)
-
-/**
- * One section per project. Projects with running workers first, then idle, then by latest
- * activity. Inside a project: live runs, then failed, then done; newest first within each.
- */
-export function groupProjects(runs: Run[]): Project[] {
-  const map = new Map<string, Project>()
-  for (const r of runs) {
-    let p = map.get(r.project)
-    if (!p) {
-      p = { key: r.project, host: r.host, path: pathOf(r.workspace), label: '', counts: zero(), lastActivityAt: 0, runs: [] }
-      map.set(r.project, p)
-    }
-    p.runs.push(r)
-    for (const k of Object.keys(p.counts) as Phase[]) p.counts[k] += r.counts[k]
-    p.lastActivityAt = Math.max(p.lastActivityAt, r.lastActivityAt)
-  }
-  const list = [...map.values()]
-  const labels = projectLabels(list)
-  for (const p of list) {
-    p.label = labels.get(p.key) ?? 'Unknown project'
-    p.runs.sort((a, b) => runRank(a) - runRank(b) || toMs(b.createdAt) - toMs(a.createdAt))
-  }
-  const rank = (p: Project) => (p.counts.running > 0 ? 0 : p.counts.idle > 0 ? 1 : 2)
-  return list.sort((a, b) => rank(a) - rank(b) || b.lastActivityAt - a.lastActivityAt)
-}
-
-/** "2m 10s", "4h 05m"; '' for unknown. Keep in sync with panel/graph.js duration(). */
-export function formatDuration(ms: number): string {
-  if (!isFinite(ms) || ms < 0) return ''
-  const s = Math.floor(ms / 1000)
-  if (s < 60) return s + 's'
-  const m = Math.floor(s / 60)
-  if (m < 60) return m + 'm ' + (s % 60) + 's'
-  const h = Math.floor(m / 60)
-  if (h < 24) return h + 'h ' + String(m % 60).padStart(2, '0') + 'm'
-  return Math.floor(h / 24) + 'd ' + (h % 24) + 'h'
-}
-
-/** Node duration: running = elapsed so far; settled = completed - created. */
-export function nodeDuration(n: Pick<Node, 'phase' | 'createdAt' | 'completedAt'>, now = Date.now()): number {
-  const start = toMs(n.createdAt)
-  if (n.phase === 'running') return now - start
-  return toMs(n.completedAt) - start
+/** Keep only runs that have a running/idle worker, plus the newest run. */
+export function liveOnly(s: Snapshot): Run[] {
+  const live = s.runs.filter((r) => r.counts.running + r.counts.idle > 0)
+  if (s.runs[0] && !live.includes(s.runs[0])) live.push(s.runs[0])
+  return live.sort((a, b) => toMs(b.createdAt) - toMs(a.createdAt))
 }
