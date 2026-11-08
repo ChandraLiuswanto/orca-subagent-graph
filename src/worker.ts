@@ -6,7 +6,7 @@ import { existsSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { Collector } from './collect.ts'
-import { buildRuns, chip, toMs, type Row, type Snapshot } from './model.ts'
+import { buildRuns, chip, groupProjects, liveRuns, toMs, type Row, type Snapshot } from './model.ts'
 
 const POLL_MS = 4000
 const RANGES: Record<string, number> = { '1d': 1, '7d': 7, '30d': 30, all: 36500 }
@@ -174,12 +174,17 @@ export default function activate(orca: OrcaWorkerApi): void {
   }
 
   orca.panels.handle('graph.read', async (input) => {
-    const range = String((input as { range?: string } | undefined)?.range ?? '7d')
-    const days = RANGES[range] ?? 7
+    const { range: r, view } = (input ?? {}) as { range?: string; view?: string }
+    const live = view === 'live'
+    const days = live ? 7 : RANGES[String(r ?? '7d')] ?? 7
     const snap = days > 7 ? await refresh(5) : latest && Date.now() - latest.at < POLL_MS ? latest : await refresh()
     const cutoff = Date.now() - days * 86400000
-    const runs = snap.runs.filter((r) => !(toMs(r.createdAt) < cutoff))
-    return { ...snap, runs }
+    // Live: active + finished within RECENT_MS, every project. History: the range.
+    const runs = live ? liveRuns(snap.runs) : snap.runs.filter((x) => !(toMs(x.createdAt) < cutoff))
+    // Projects reference runs by index so each run is serialized once.
+    const index = new Map(runs.map((x, i) => [x, i]))
+    const projects = groupProjects(runs, snap.runs).map(({ runs: list, ...p }) => ({ ...p, runs: list.map((x) => index.get(x)!) }))
+    return { ...snap, runs, projects, knownProjects: [...new Set(snap.runs.map((x) => x.project))] }
   })
 
   orca.panels.handle('terminal.focus', async (input) => {
