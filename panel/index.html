@@ -1,0 +1,33 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Subagent Graph</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <div class="seg" role="tablist" aria-label="View">
+        <button data-view="live" class="on">Live</button>
+        <button data-view="history">History</button>
+      </div>
+      <select id="range" aria-label="History range" hidden>
+        <option value="1d">24 hours</option>
+        <option value="7d" selected>7 days</option>
+        <option value="30d">30 days</option>
+        <option value="all">All</option>
+      </select>
+      <span id="summary" class="mut"></span>
+    </header>
+    <div id="legend" class="legend">
+      <span><i class="dot running"></i>running</span>
+      <span><i class="dot idle"></i>idle (open)</span>
+      <span><i class="dot done"></i>done</span>
+      <span><i class="dot failed"></i>failed</span>
+    </div>
+    <main id="app"></main>
+    <div id="toast" class="toast" hidden></div>
+    <script src="graph.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

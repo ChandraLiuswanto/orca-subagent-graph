@@ -1,0 +1,63 @@
+{
+  "manifestVersion": 2,
+  "id": "subagent-graph",
+  "name": "Subagent Graph",
+  "version": "0.2.0",
+  "description": "Counts your Orca orchestration subagents in the status bar and draws them as a nested graph, for this machine and paired Orca servers.",
+  "license": "MIT",
+  "engines": {
+    "orca": ">=1.4.248"
+  },
+  "execution": "trusted-worker",
+  "pluginApi": 1,
+  "main": "src/worker.ts",
+  "contributes": {
+    "panels": [
+      {
+        "id": "subagent-graph",
+        "title": "Subagents",
+        "icon": "blocks",
+        "entry": "panel/index.html"
+      }
+    ],
+    "commands": [
+      {
+        "id": "subagentGraph.toggleSidebar",
+        "title": "Subagent Graph: Toggle right sidebar",
+        "action": "sidebar.right.toggle"
+      }
+    ],
+    "statusBarItems": [
+      {
+        "id": "subagents",
+        "text": "0 subagents",
+        "icon": "agent",
+        "tone": "neutral",
+        "tooltip": "Orca orchestration workers (running + idle)",
+        "command": "subagentGraph.toggleSidebar"
+      }
+    ],
+    "settings": [
+      {
+        "key": "hosts",
+        "title": "Orca hosts to watch",
+        "description": "auto = this machine plus every paired Orca server. Or a comma-separated list such as local,fedora.",
+        "type": "string",
+        "default": "auto"
+      },
+      {
+        "key": "cliPath",
+        "title": "Orca CLI path (optional)",
+        "description": "Full path to orca.exe / orca if it is not found automatically.",
+        "type": "string",
+        "default": ""
+      }
+    ]
+  },
+  "repository": "https://github.com/ChandraLiuswanto/orca-subagent-graph",
+  "capabilities": [
+    {
+      "kind": "settings:own"
+    }
+  ]
+}

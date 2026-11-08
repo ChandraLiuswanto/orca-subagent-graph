@@ -1,0 +1,58 @@
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  --bg: var(--orca-background, #0b0b0b);
+  --fg: var(--orca-foreground, #e6e6e6);
+  --muted: var(--orca-muted-foreground, #9a9a9a);
+  --border: var(--orca-border, #262626);
+  --card: var(--orca-card, #141414);
+  --accent: var(--orca-accent, #1d1d1d);
+  --running: #60a5fa;
+  --idle: #4ade80;
+  --done: #7c7c7c;
+  --failed: #f87171;
+  background: var(--bg);
+  color: var(--fg);
+  font: 12px/1.35 var(--orca-font-sans, system-ui, sans-serif);
+  overflow: auto;
+}
+.mut { color: var(--muted); }
+.bar { display: flex; align-items: center; gap: 8px; padding: 8px 10px 4px; position: sticky; top: 0; background: var(--bg); z-index: 2; }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 999px; overflow: hidden; }
+.seg button { background: none; border: 0; color: var(--muted); padding: 3px 12px; font: inherit; cursor: pointer; }
+.seg button.on { background: var(--accent); color: var(--fg); }
+select { background: var(--card); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; font: inherit; padding: 2px 4px; }
+#summary { margin-left: auto; white-space: nowrap; }
+.legend { display: flex; gap: 12px; padding: 0 10px 6px; color: var(--muted); font-size: 11px; flex-wrap: wrap; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; vertical-align: -1px; }
+.dot.running { background: var(--running); box-shadow: 0 0 0 3px color-mix(in srgb, var(--running) 25%, transparent); }
+.dot.idle { background: var(--idle); }
+.dot.done { background: var(--done); }
+.dot.failed { background: var(--failed); }
+.run { margin: 6px 8px 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--card); }
+.run > summary { flex-wrap: wrap; list-style: none; cursor: pointer; padding: 7px 10px; display: flex; gap: 8px; align-items: center; }
+.run > summary::-webkit-details-marker { display: none; }
+.run > summary .t { flex: 1 1 120px; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.run > summary .c { margin-left: auto; display: flex; gap: 6px; white-space: nowrap; }
+.pill { border: 1px solid var(--border); border-radius: 999px; padding: 0 7px; font-size: 11px; }
+.pill.running { color: var(--running); }
+.pill.idle { color: var(--idle); }
+.pill.failed { color: var(--failed); }
+.graph { overflow-x: auto; padding: 0 6px 8px; }
+svg { display: block; }
+svg .link { fill: none; stroke: var(--border); stroke-width: 1.5; }
+svg .link.live { stroke: color-mix(in srgb, var(--running) 55%, var(--border)); }
+svg .node rect { fill: var(--bg); stroke: var(--border); rx: 7; }
+svg .node.root rect { fill: var(--accent); }
+svg .node.clickable { cursor: pointer; }
+svg .node.clickable:hover rect { stroke: var(--fg); }
+svg .node .title { fill: var(--fg); font-size: 12px; font-weight: 600; }
+svg .node .sub { fill: var(--muted); font-size: 10.5px; }
+svg .node.running rect { stroke: var(--running); }
+svg .node.idle rect { stroke: color-mix(in srgb, var(--idle) 60%, var(--border)); }
+svg .node.failed rect { stroke: var(--failed); }
+svg .ring { fill: none; stroke: var(--running); opacity: 0.6; animation: pulse 1.6s ease-out infinite; transform-box: fill-box; transform-origin: center; }
+@keyframes pulse { from { transform: scale(1); opacity: 0.7; } to { transform: scale(2.4); opacity: 0; } }
+.empty { padding: 30px 16px; text-align: center; color: var(--muted); }
+.err { margin: 10px; padding: 8px 10px; border: 1px solid var(--failed); border-radius: 8px; color: var(--failed); }
+.toast { position: fixed; bottom: 10px; left: 10px; right: 10px; background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; }
