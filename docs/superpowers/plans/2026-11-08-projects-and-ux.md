@@ -301,8 +301,13 @@ and `…:panel/style.css`, `…:panel/index.html`).
   counts pills. Tree: `SGGraph.render(run, opts)`; node detail open state in
   memory (`view.nodes`), toggle re-draws from the last snapshot.
 - [ ] Collapse persistence in `localStorage 'sg.view'`: keys `p:<projectKey>`
-  and `r:<host>:<runId>`, value `{o: open, d: defaultAtThatTime}`; an override
-  applies only while the default is unchanged (so a newly failed run re-expands).
+  and `r:<host>:<runId>`, value `{o: open, d: defaultAtThatTime, f: failedAtThatTime}`
+  where `f` is `run.counts.failed > 0` (always `false` for `p:` keys). An override
+  applies only while both `d` and `f` are unchanged. A run that gains a failure
+  therefore drops a stored collapse and re-expands (U8), even in Live where its
+  default was already open. Check it in the harness: collapse a running run,
+  re-serve the fixture with that run failed, and the run reopens, in both Live
+  and History.
   Ignore the async `toggle` event caused by setting `.open` in code (compare with
   the last known value). On each draw prune `p:` keys not in
   `snap.knownProjects` and legacy keys without `p:`/`r:` prefix; cap stays 200.
@@ -338,7 +343,9 @@ and `…:panel/style.css`, `…:panel/index.html`).
   `.scratch/`, not committed) that defines `window.orca.plugin.request/on`
   returning a fixture payload in the contract shape (≥3 projects incl. one
   remote host and two `main` labels, a running node, an idle node, a failed
-  run, a 3-deep tree). Playwright 1.59 is available via `npx playwright`.
+  run, a 3-deep tree). Load `panel/graph.js` from the working tree if Task 4 has
+  committed it; otherwise use `git show stash@{0}:panel/graph.js > .scratch/graph.js`
+  (same contract). Playwright 1.59 is available via `npx playwright`.
   Check: no horizontal scrollbar on `body`, no console errors, chips filter,
   search "No matches" + Clear works, node detail opens. Screenshot to
   `.scratch/panel-280.png`.
