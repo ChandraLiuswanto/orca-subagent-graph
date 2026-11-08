@@ -6,6 +6,7 @@
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
+    <div class="top">
     <header class="bar">
       <div class="seg" role="tablist" aria-label="View">
         <button data-view="live" class="on">Live</button>
@@ -19,11 +20,10 @@
       </select>
       <span id="summary" class="mut"></span>
     </header>
-    <div id="legend" class="legend">
-      <span><i class="dot running"></i>running</span>
-      <span><i class="dot idle"></i>idle (open)</span>
-      <span><i class="dot done"></i>done</span>
-      <span><i class="dot failed"></i>failed</span>
+    <div class="tools">
+      <input id="search" type="search" placeholder="Search tasks, runs, projects, models, ids" aria-label="Search" autocomplete="off" spellcheck="false" />
+      <div id="filters" class="chips" role="toolbar" aria-label="Filter by status"></div>
+    </div>
     </div>
     <main id="app"></main>
     <div id="toast" class="toast" hidden></div>

@@ -1,26 +1,15 @@
-// Left-to-right tree layout drawn as SVG: coordinator -> workers -> nested workers.
-// Exposes window.SGGraph.render(run, onNodeClick) -> SVGElement.
+// Indented tree as nested HTML lists: coordinator -> workers -> nested workers. Any depth fits a
+// narrow sidebar, and a node's details expand inline under it.
+// Exposes window.SGGraph = { render, ago, duration, toMs, glyph, nodeMs, esc }.
 ;(function () {
-  var NS = 'http://www.w3.org/2000/svg'
-  var H = 40 // node height
-  var GY = 10 // vertical gap between leaves
-  var PAD = 8
-
-  function el(name, attrs, parent) {
-    var n = document.createElementNS(NS, name)
-    for (var k in attrs) n.setAttribute(k, attrs[k])
-    if (parent) parent.appendChild(n)
-    return n
+  function toMs(v) {
+    if (typeof v === 'number') return v
+    if (typeof v !== 'string' || !v) return NaN
+    return Date.parse(v.indexOf('T') > 0 ? v : v.replace(' ', 'T') + 'Z')
   }
 
-  function clip(text, max) {
-    text = String(text || '')
-    return text.length > max ? text.slice(0, max - 1) + '…' : text
-  }
-
-  function ago(iso) {
-    if (typeof iso !== 'string' || !iso) return ''
-    var t = Date.parse(iso.indexOf('T') > 0 ? iso : iso.replace(' ', 'T') + 'Z')
+  function ago(v) {
+    var t = toMs(v)
     if (!isFinite(t)) return ''
     var s = Math.max(0, (Date.now() - t) / 1000)
     if (s < 60) return Math.round(s) + 's ago'
@@ -29,82 +18,125 @@
     return Math.round(s / 86400) + 'd ago'
   }
 
-  var IND = 22 // indent per nesting level
-  // Indented tree: one row per node in depth-first order, so any depth fits a narrow sidebar.
-  function layout(root, width) {
-    var row = 0
-    var maxDepth = 0
-    function place(n, depth) {
-      maxDepth = Math.max(maxDepth, depth)
-      n._x = PAD + depth * IND
-      n._y = PAD + row * (H + GY)
-      n._w = Math.max(150, width - n._x - PAD)
-      row++
-      var kids = n.children || []
-      for (var i = 0; i < kids.length; i++) place(kids[i], depth + 1)
-    }
-    place(root, 0)
-    return { width: Math.max(width, PAD + maxDepth * IND + 150 + PAD), height: PAD * 2 + row * (H + GY) - GY }
+  // Same output as formatDuration in src/model.ts.
+  function duration(ms) {
+    if (!isFinite(ms) || ms < 0) return ''
+    var s = Math.floor(ms / 1000)
+    if (s < 60) return s + 's'
+    var m = Math.floor(s / 60)
+    if (m < 60) return m + 'm ' + (s % 60) + 's'
+    var h = Math.floor(m / 60)
+    if (h < 24) return h + 'h ' + (m % 60 < 10 ? '0' : '') + (m % 60) + 'm'
+    return Math.floor(h / 24) + 'd ' + (h % 24) + 'h'
   }
 
-  function render(run, onClick, width) {
-    var root = {
-      id: '__coord__' + run.id,
-      root: true,
-      title: 'Coordinator',
-      sub: run.coordinator ? clip(run.coordinator, 30) : 'main agent',
-      children: run.roots
-    }
-    var size = layout(root, Math.max(220, width || 320))
-    var svg = el('svg', { width: size.width, height: size.height, viewBox: '0 0 ' + size.width + ' ' + size.height })
-    var links = el('g', {}, svg)
-    var nodes = el('g', {}, svg)
-
-    ;(function draw(n) {
-      var kids = n.children || []
-      for (var i = 0; i < kids.length; i++) {
-        var c = kids[i]
-        var x1 = n._x + 12, y1 = n._y + H, y2 = c._y + H / 2, x2 = c._x
-        el('path', {
-          d: 'M' + x1 + ',' + y1 + ' V' + (y2 - 6) + ' Q' + x1 + ',' + y2 + ' ' + (x1 + 6) + ',' + y2 + ' H' + x2,
-          class: 'link' + (c.phase === 'running' ? ' live' : '')
-        }, links)
-        draw(c)
-      }
-      var g = el('g', {
-        class: 'node ' + (n.root ? 'root' : n.phase) + (!n.root && n.terminal && n.phase !== 'done' ? ' clickable' : ''),
-        transform: 'translate(' + n._x + ',' + n._y + ')'
-      }, nodes)
-      el('rect', { width: n._w, height: H, rx: 7 }, g)
-      if (!n.root) {
-        var cx = 12, cy = H / 2
-        if (n.phase === 'running') el('circle', { cx: cx, cy: cy, r: 4, class: 'ring' }, g)
-        el('circle', { cx: cx, cy: cy, r: 4, fill: 'var(--' + n.phase + ')' }, g)
-      }
-      var tx = n.root ? 10 : 24
-      var title = el('text', { x: tx, y: 16, class: 'title' }, g)
-      var chars = Math.floor((n._w - tx - 8) / 6.6)
-      title.textContent = clip(n.title, chars)
-      var sub = el('text', { x: tx, y: 31, class: 'sub' }, g)
-      if (n.root) {
-        sub.textContent = clip(n.sub, Math.floor((n._w - tx - 8) / 5.8))
-      } else {
-        var bits = [n.agent || 'agent']
-        if (n.model) bits.push(n.model)
-        bits.push(n.phase === 'running' ? 'started ' + ago(n.createdAt) : ago(n.completedAt || n.createdAt))
-        if (n.followUps) bits.push('+' + n.followUps + ' follow-up' + (n.followUps > 1 ? 's' : ''))
-        sub.textContent = clip(bits.join(' · '), Math.floor((n._w - tx - 8) / 5.8))
-      }
-      var tip = el('title', {}, g)
-      tip.textContent = n.root
-        ? 'Coordinator ' + (run.coordinator || '')
-        : n.title + '\n' + n.id + '\nstate: ' + n.phase + ' (' + n.status + ')' + (n.terminal ? '\nterminal: ' + n.terminal : '')
-      if (!n.root && n.terminal && n.phase !== 'done') {
-        g.addEventListener('click', function () { onClick(n) })
-      }
-    })(root)
-    return svg
+  /** Running: elapsed so far. Settled: completed - created. */
+  function nodeMs(n, now) {
+    var start = toMs(n.createdAt)
+    return n.phase === 'running' ? (now === undefined ? Date.now() : now) - start : toMs(n.completedAt) - start
   }
 
-  window.SGGraph = { render: render, ago: ago }
+  function fmtTime(v) {
+    var t = toMs(v)
+    return isFinite(t) ? new Date(t).toLocaleString() : '—'
+  }
+
+  // One glyph per phase next to the coloured dot, so state never relies on colour alone.
+  var GLYPHS = {
+    running: '<svg class="gl spin" viewBox="0 0 12 12" aria-hidden="true"><path d="M6 1.5a4.5 4.5 0 1 1-4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>',
+    idle: '<svg class="gl" viewBox="0 0 12 12" aria-hidden="true"><path d="M4 2.5v7M8 2.5v7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>',
+    done: '<svg class="gl" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.2 6.4l2.4 2.4 5.2-5.6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    failed: '<svg class="gl" viewBox="0 0 12 12" aria-hidden="true"><path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>'
+  }
+  function glyph(phase) {
+    return '<span class="st ' + esc(phase) + '"><i class="dot ' + esc(phase) + '"></i>' + (GLYPHS[phase] || '') + '</span>'
+  }
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"]/g, function (ch) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch] })
+  }
+
+  function h(tag, cls, html) {
+    var n = document.createElement(tag)
+    if (cls) n.className = cls
+    if (html != null) n.innerHTML = html
+    return n
+  }
+
+  function detail(n, opts) {
+    var d = h('div', 'detail')
+    var rows = [
+      ['Dispatch', '<code>' + esc(n.id) + '</code><button class="copy" data-copy="' + esc(n.id) + '" title="Copy dispatch id">Copy</button>'],
+      ['Task', n.taskId ? '<code>' + esc(n.taskId) + '</code>' : '—'],
+      ['Terminal', n.terminal ? '<code>' + esc(n.terminal) + '</code>' : '—'],
+      ['Agent', esc(n.agent || 'agent') + (n.model ? ' · ' + esc(n.model) : '')],
+      ['Created', esc(fmtTime(n.createdAt))],
+      ['Completed', n.phase === 'running' ? 'still running' : esc(fmtTime(n.completedAt))],
+      ['Duration', esc(duration(nodeMs(n)) || '—')],
+      ['Follow-ups', esc(n.followUps || 0)]
+    ]
+    if (n.host && n.host !== 'local') rows.push(['Host', esc(n.host)])
+    var dl = h('dl')
+    rows.forEach(function (r) { dl.innerHTML += '<dt>' + r[0] + '</dt><dd>' + r[1] + '</dd>' })
+    d.appendChild(dl)
+    if (n.terminal && (n.phase === 'running' || n.phase === 'idle')) {
+      var b = h('button', 'focus', 'Focus terminal')
+      b.addEventListener('click', function (ev) { ev.stopPropagation(); opts.focus(n) })
+      d.appendChild(b)
+    }
+    d.addEventListener('click', function (ev) {
+      var c = ev.target.closest('.copy')
+      if (c) { ev.stopPropagation(); opts.copy(c.dataset.copy) }
+    })
+    return d
+  }
+
+  function nodeLi(n, opts) {
+    var li = h('li', n.phase + (n.ctx ? ' ctx' : ''))
+    var key = (n.host || '') + ':' + n.id
+    var open = opts.isOpen(key)
+    var card = h('div', 'card ' + n.phase)
+    card.setAttribute('role', 'button')
+    card.setAttribute('tabindex', '0')
+    card.setAttribute('aria-expanded', open ? 'true' : 'false')
+    card.dataset.key = key
+    var bits = ['<span class="ph">' + esc(n.phase) + '</span>']
+    var ms = nodeMs(n)
+    if (n.phase === 'running') bits.push('<span class="dur" data-start="' + esc(toMs(n.createdAt)) + '">' + esc(duration(ms)) + '</span>')
+    else if (duration(ms)) bits.push('<span class="dur">' + esc(duration(ms)) + '</span>')
+    bits.push(esc(n.agent || 'agent'))
+    if (n.model) bits.push(esc(n.model))
+    if (n.followUps) bits.push('+' + esc(n.followUps) + ' follow-up' + (n.followUps > 1 ? 's' : ''))
+    card.innerHTML = glyph(n.phase) + '<div class="txt"><div class="title">' + esc(n.title) + '</div><div class="sub">' + bits.join(' · ') + '</div></div>'
+    card.title = n.title + '\n' + n.id + '\nstate: ' + n.phase + ' (' + n.status + ')\n' +
+      (n.phase === 'running' ? 'started ' + ago(n.createdAt) : (n.completedAt ? 'finished ' + ago(n.completedAt) : 'started ' + ago(n.createdAt)))
+    function toggle() { opts.toggle(key) }
+    card.addEventListener('click', toggle)
+    card.addEventListener('keydown', function (ev) { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); toggle() } })
+    li.appendChild(card)
+    if (open) li.appendChild(detail(n, opts))
+    if (n.children && n.children.length) li.appendChild(list(n.children, opts))
+    return li
+  }
+
+  function list(nodes, opts) {
+    var ul = h('ul')
+    nodes.forEach(function (c) { ul.appendChild(nodeLi(c, opts)) })
+    return ul
+  }
+
+  /** opts: { roots, focus(node), copy(text), isOpen(key), toggle(key) } */
+  function render(run, opts) {
+    var tree = h('ul', 'tree')
+    var li = h('li', 'root')
+    var card = h('div', 'card root', '<div class="txt"><div class="title">Coordinator</div><div class="sub">' + esc(run.coordinator || 'main agent') + '</div></div>')
+    card.title = 'Coordinator ' + (run.coordinator || '')
+    li.appendChild(card)
+    var roots = opts.roots || run.roots
+    if (roots.length) li.appendChild(list(roots, opts))
+    tree.appendChild(li)
+    return tree
+  }
+
+  window.SGGraph = { render: render, ago: ago, duration: duration, toMs: toMs, glyph: glyph, nodeMs: nodeMs, esc: esc }
 })()

@@ -131,10 +131,21 @@ export class Collector {
         // Encode the liveness probe into release_state so model.phaseOf stays pure.
         release_state: closed ? 'released' : openNow.has(key) ? 'open' : release,
         terminal_handle: w.agentTerminalHandle ?? w.resource?.terminalHandle ?? null,
-        objective: this.objectives.get(host + w.runId) ?? null
+        objective: this.objectives.get(host + w.runId) ?? null,
+        task_id: w.taskId ?? null,
+        workspace: workspaceOf(w)
       }
     })
   }
+}
+
+/** Workspace id from a worker-list entry: top-level `workspace` (string or {id}), projection, then resource. */
+function workspaceOf(w: any): string | null {
+  const top = w?.workspace
+  for (const v of [typeof top === 'string' ? top : top?.id, w?.projection?.workspace?.id, w?.resource?.worktreeId]) {
+    if (typeof v === 'string' && v) return v
+  }
+  return null
 }
 
 async function lanes<T>(items: T[], n: number, fn: (item: T) => Promise<void>): Promise<void> {
