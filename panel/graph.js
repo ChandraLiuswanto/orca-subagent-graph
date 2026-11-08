@@ -19,7 +19,7 @@
   }
 
   function ago(iso) {
-    if (!iso) return ''
+    if (typeof iso !== 'string' || !iso) return ''
     var t = Date.parse(iso.indexOf('T') > 0 ? iso : iso.replace(' ', 'T') + 'Z')
     if (!isFinite(t)) return ''
     var s = Math.max(0, (Date.now() - t) / 1000)

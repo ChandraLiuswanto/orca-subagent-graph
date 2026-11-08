@@ -21,6 +21,9 @@ export class Collector {
   private closed = new Set<string>()
   private titles = new Map<string, Map<string, string>>()
   private objectives = new Map<string, string>()
+  private lastOpen = new Set<string>()
+  private backoff = new Map<string, number>()
+  private runListAt = new Map<string, number>()
 
   private cli: Cli
   constructor(cli: Cli) {
@@ -45,7 +48,8 @@ export class Collector {
 
     // Run objectives: one call; refresh when an unknown run shows up.
     const runIds = new Set(workers.map((w) => w.runId))
-    if ([...runIds].some((id) => !this.objectives.has(host + id))) {
+    if ([...runIds].some((id) => !this.objectives.has(host + id)) && Date.now() - (this.runListAt.get(host) ?? 0) > 60000) {
+      this.runListAt.set(host, Date.now())
       const res = await this.cli(['orchestration', 'run-list', '--full', '--limit', '100', ...env]).catch(() => null)
       for (const r of res?.runs ?? []) this.objectives.set(host + r.id, r.objective)
     }
@@ -56,14 +60,17 @@ export class Collector {
       const need = workers.some((w) => w.runId === runId && !known?.has(w.taskId))
       if (!need) continue
       const res = await this.cli(['orchestration', 'task-list', '--run', runId, ...env]).catch(() => null)
-      const map = new Map<string, string>()
+      const map = new Map<string, string>(known ?? [])
       for (const t of res?.tasks ?? []) map.set(t.id, t.title)
+      // Remember misses too, so a task the list does not return is not refetched every tick.
+      for (const w of workers) if (w.runId === runId && !map.has(w.taskId)) map.set(w.taskId, '')
       this.titles.set(host + runId, map)
     }
 
     // worker-show for: never seen, still running, or settled but terminal maybe still open.
     const shows = workers.filter((w) => {
       const key = host + w.dispatchId
+      if ((this.backoff.get(key) ?? 0) > Date.now()) return false
       const s = this.statics.get(key)
       if (!s) return true
       if (!SETTLED.has(w.dispatchStatus)) return false // static known; running needs nothing else
@@ -75,7 +82,13 @@ export class Collector {
     await lanes(shows, 6, async (w) => {
       const key = host + w.dispatchId
       const res = await this.cli(['orchestration', 'worker-show', '--dispatch', w.dispatchId, '--full', ...env]).catch(() => null)
-      if (!res) return
+      if (!res) {
+        // Keep the previous answer and retry later instead of hammering a slow server.
+        if (this.lastOpen.has(key)) openNow.add(key)
+        this.backoff.set(key, Date.now() + 30000)
+        return
+      }
+      this.backoff.delete(key)
       const d = res.dispatch ?? {}
       const launch = res.worker?.startOptions?.launch?.effective ?? {}
       this.statics.set(key, {
@@ -90,6 +103,12 @@ export class Collector {
       if (t && t.connected && !t.exitCause) openNow.add(key)
       else if (SETTLED.has(d.status ?? w.dispatchStatus)) this.closed.add(key)
     })
+    // Workers not probed this tick (backed off) keep their last known liveness.
+    for (const w of workers) {
+      const key = host + w.dispatchId
+      if (!shows.includes(w) && this.lastOpen.has(key) && !this.closed.has(key)) openNow.add(key)
+    }
+    this.lastOpen = new Set([...this.lastOpen].filter((k) => !k.startsWith(host)).concat([...openNow]))
 
     return workers.map((w): Row => {
       const key = host + w.dispatchId
@@ -105,7 +124,7 @@ export class Collector {
         follow_up_of_dispatch_id: s?.follow_up_of_dispatch_id ?? null,
         created_at: s?.created_at ?? '',
         completed_at: s?.completed_at ?? null,
-        title: this.titles.get(host + w.runId)?.get(w.taskId) ?? null,
+        title: this.titles.get(host + w.runId)?.get(w.taskId) || null,
         agent: s?.agent ?? null,
         model: s?.model ?? null,
         worker_state: w.workerState ?? null,

@@ -19,6 +19,7 @@ function candidates(): string[] {
   if (process.platform === 'win32') {
     const roaming = process.env.APPDATA ?? path.join(home, 'AppData', 'Roaming')
     const local = process.env.LOCALAPPDATA ?? path.join(home, 'AppData', 'Local')
+    // .exe launchers first: they avoid cmd.exe quoting entirely.
     for (const dir of [path.join(local, 'Programs', 'Orca'), path.join(local, 'Programs', 'orca'), path.join(local, 'orca')]) {
       out.push(path.join(dir, 'resources', 'bin', 'orca.exe'))
     }
@@ -33,18 +34,47 @@ function candidates(): string[] {
   return out
 }
 
+// Orca hands plugin workers only PATH/HOME/TEMP-style variables. The Windows CLI needs APPDATA to
+// find %APPDATA%\\orca\\orca-runtime.json, so rebuild the per-user folders from the home directory.
+function childEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env }
+  if (process.platform === 'win32') {
+    const home = env.USERPROFILE ?? os.homedir()
+    env.USERPROFILE ??= home
+    env.APPDATA ??= path.join(home, 'AppData', 'Roaming')
+    env.LOCALAPPDATA ??= path.join(home, 'AppData', 'Local')
+    env.SystemRoot ??= env.SYSTEMROOT ?? 'C:\\Windows'
+  }
+  return env
+}
+const ENV = childEnv()
+
+function onPath(): string[] {
+  const names = process.platform === 'win32' ? ['orca.exe', 'orca.cmd'] : ['orca']
+  const dirs = String(ENV.PATH ?? ENV.Path ?? '').split(path.delimiter).filter(Boolean)
+  return dirs.flatMap((d) => names.map((n) => path.join(d, n)))
+}
+
 function findCli(override: string): string | null {
   if (override && existsSync(override)) return override
-  return candidates().find((p) => existsSync(p)) ?? null
+  return [...candidates(), ...onPath()].find((p) => existsSync(p)) ?? null
 }
+
+// Host names reach a cmd.exe command line for .cmd shims; allow only plain characters.
+const SAFE_ARG = /^[A-Za-z0-9_.:\/=,-]*$/
 
 function run(cliPath: string, args: string[], timeoutMs = 8000): Promise<any> {
   const isCmd = /\.cmd$/i.test(cliPath)
+  if (isCmd && !args.every((a) => SAFE_ARG.test(a))) {
+    return Promise.reject(new Error('Refusing to pass unusual characters through orca.cmd; set the CLI path to orca.exe'))
+  }
+  // cmd.exe /s /c "<"shim" args>": one verbatim string so Node does not re-quote it.
+  const cmdLine = '/d /s /c "' + ['"' + cliPath + '"', ...args, '--json'].join(' ') + '"'
   return new Promise((resolve, reject) => {
     execFile(
-      isCmd ? process.env.ComSpec ?? 'cmd.exe' : cliPath,
-      isCmd ? ['/d', '/s', '/c', cliPath, ...args, '--json'] : [...args, '--json'],
-      { timeout: timeoutMs, maxBuffer: 8 << 20, windowsHide: true },
+      isCmd ? ENV.ComSpec ?? 'cmd.exe' : cliPath,
+      isCmd ? [cmdLine] : [...args, '--json'],
+      { timeout: timeoutMs, maxBuffer: 8 << 20, windowsHide: true, env: ENV, windowsVerbatimArguments: isCmd },
       (err, stdout) => {
         let parsed: any = null
         try {
@@ -73,7 +103,11 @@ export default function activate(orca: OrcaWorkerApi): void {
   let lastChip = ''
   let busy: Promise<Snapshot> | null = null
 
+  let settingsAt = 0
+  let hostsCache: { at: number; list: string[] } | null = null
   async function loadSettings(): Promise<void> {
+    if (Date.now() - settingsAt < 60000 && cliPath) return
+    settingsAt = Date.now()
     try {
       const s = await orca.settings.get()
       settings = { hosts: String(s?.hosts ?? 'auto'), cliPath: String(s?.cliPath ?? '') }
@@ -85,11 +119,16 @@ export default function activate(orca: OrcaWorkerApi): void {
     const raw = settings.hosts.trim()
     if (raw && raw !== 'auto') return raw.split(',').map((h) => h.trim()).filter(Boolean)
     // auto: this machine plus every paired Orca server
+    if (hostsCache && Date.now() - hostsCache.at < 60000) return hostsCache.list
     const out = ['local']
     try {
       const res = await run(cliPath!, ['environment', 'list'])
-      for (const e of res?.environments ?? []) if (e?.name) out.push(String(e.name))
+      for (const e of res?.environments ?? []) {
+        const sel = String(e?.name && SAFE_ARG.test(e.name) ? e.name : e?.id ?? '')
+        if (sel) out.push(sel)
+      }
     } catch {}
+    hostsCache = { at: Date.now(), list: out }
     return out
   }
 
@@ -109,9 +148,16 @@ export default function activate(orca: OrcaWorkerApi): void {
     return snap
   }
 
+  let busyPages = 0
   function refresh(pages = 1): Promise<Snapshot> {
-    if (!busy) busy = collect(pages).finally(() => (busy = null))
-    return busy
+    if (busy && busyPages >= pages) return busy
+    const prev = busy ?? Promise.resolve(null)
+    busyPages = pages
+    const next: Promise<Snapshot> = prev.catch(() => null).then(() => collect(pages))
+    busy = next.finally(() => {
+      if (busy === next || busyPages === pages) busy = null
+    })
+    return next
   }
 
   async function tick(): Promise<void> {

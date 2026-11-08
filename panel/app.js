@@ -5,7 +5,7 @@
   var summary = document.getElementById('summary')
   var rangeSel = document.getElementById('range')
   var toastEl = document.getElementById('toast')
-  var view = { mode: 'live', range: '7d', busy: false, open: {} }
+  var view = { mode: 'live', range: '7d', busy: false, again: false, open: {} }
   try {
     var saved = JSON.parse(localStorage.getItem('sg.view') || '{}')
     if (saved.mode) view.mode = saved.mode
@@ -14,6 +14,8 @@
   } catch (e) {}
 
   function persist() {
+    var ids = Object.keys(view.open)
+    if (ids.length > 200) ids.slice(0, ids.length - 200).forEach(function (k) { delete view.open[k] })
     try { localStorage.setItem('sg.view', JSON.stringify({ mode: view.mode, range: view.range, open: view.open })) } catch (e) {}
   }
 
@@ -71,8 +73,15 @@
       var d = document.createElement('details')
       d.className = 'run'
       var live = run.counts.running + run.counts.idle > 0
-      d.open = run.id in view.open ? view.open[run.id] : (view.mode === 'live' || live || i === 0)
-      d.addEventListener('toggle', function () { view.open[run.id] = d.open; persist() })
+      var def = view.mode === 'live' || live || i === 0
+      d.open = run.id in view.open ? view.open[run.id] : def
+      setTimeout(function () {
+        d.addEventListener('toggle', function () {
+          if (d.open === def) delete view.open[run.id]
+          else view.open[run.id] = d.open
+          persist()
+        })
+      }, 0)
       var s = document.createElement('summary')
       s.innerHTML = '<span class="t">' + esc(run.objective) + '</span>' + (run.host && run.host !== 'local' ? '<span class="pill">' + esc(run.host) + '</span>' : '') + '<span class="mut">' + esc(Graph.ago(run.createdAt)) + '</span><span class="c">' + pills(run.counts) + '</span>'
       s.title = run.id
@@ -86,14 +95,18 @@
   }
 
   function load() {
-    if (view.busy || !api || !api.plugin) return
+    if (!api || !api.plugin) return
+    if (view.busy) { view.again = true; return }
     view.busy = true
     var range = view.mode === 'live' ? '7d' : view.range
     api.plugin.request('graph.read', { range: range }, { timeoutMs: 20000 }).then(function (snap) {
       view.busy = false
-      draw(snap)
+      if (snap && Array.isArray(snap.runs) && snap.totals) draw(snap)
+      else app.innerHTML = '<div class="err">' + esc((snap && snap.error) || 'No data from the worker') + '</div>'
+      if (view.again) { view.again = false; load() }
     }, function (err) {
       view.busy = false
+      if (view.again) { view.again = false; setTimeout(load, 500) }
       app.innerHTML = '<div class="err">' + esc((err && err.message) || 'Worker unavailable') + '</div>'
     })
   }
