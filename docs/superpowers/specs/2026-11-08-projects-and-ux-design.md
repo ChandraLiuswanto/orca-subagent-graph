@@ -34,8 +34,10 @@ soon as any other project starts a run. Every worker row carries its `workspace`
 
 ### R1 Project identity
 
-- `Row` gains `workspace: string | null` from `worker-list`'s `workspace`
-  field. The path is the part after `::`; no `::` means the whole string.
+- `Row` gains `workspace: string | null` from `worker-list`. Verified on
+  fedora: the value is at `projection.workspace.id`, with `resource.worktreeId`
+  as fallback, and there is no top-level `workspace` field (accept one if a
+  future Orca adds it). It costs no extra CLI call. The path is the part after `::`; no `::` means the whole string.
 - A run's project is the workspace of its root worker: the earliest-created
   worker with no creator. Nested workers in another worktree still draw under
   their parent's run.
