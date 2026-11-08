@@ -179,3 +179,13 @@ test('chip tooltip lists up to 3 projects then +N more, within 256 chars', () =>
   const one = chip(buildRuns([row({ status: 'dispatched' })], () => false, 0))
   assert.equal(one.tooltip, 'Orca workers: 1 running, 0 idle. By project: proj-a 1. Open the Subagents panel for the graph.')
 })
+
+test('chip tooltip keeps "By project:" and "+N more" when labels are very long', () => {
+  const rows = ['a', 'b', 'c', 'd', 'e'].map((x) =>
+    row({ id: x, run_id: 'r_' + x, workspace: 'w::/p/' + x.repeat(100), status: 'dispatched' })
+  )
+  const t = chip(buildRuns(rows, () => false, 0)).tooltip!
+  assert.ok(t.length <= 256, `length ${t.length}`)
+  assert.ok(t.includes('By project:'))
+  assert.ok(t.includes('+2 more'))
+})

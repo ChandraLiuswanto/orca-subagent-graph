@@ -229,10 +229,20 @@ export function chip(s: Snapshot): { visible: boolean; text?: string; tone?: 'ne
   const head = `Orca workers: ${parts.join(', ')}.`
   const tail = ' Open the Subagents panel for the graph.'
   const busy = groupProjects(s.runs).filter((p) => p.counts.running + p.counts.idle > 0)
-  let by = busy.slice(0, 3).map((p) => `${p.label} ${p.counts.running + p.counts.idle}`).join(', ')
-  if (busy.length > 3) by += `, +${busy.length - 3} more`
-  let tooltip = head + (by ? ` By project: ${by}.` : '') + tail
-  if (tooltip.length > 256) tooltip = (head + (by ? ` By project: ${by}.` : '')).slice(0, 255) + '…'
+  const shown = busy.slice(0, 3)
+  const more = busy.length > 3 ? `, +${busy.length - 3} more` : ''
+  const byProject = (label: (p: Project) => string) =>
+    shown.length ? ` By project: ${shown.map((p) => `${label(p)} ${p.counts.running + p.counts.idle}`).join(', ')}${more}.` : ''
+  let tooltip = head + byProject((p) => p.label) + tail
+  // Too long: drop the closing hint, then ellipsize each label to an equal share so the
+  // "By project:" list and its "+N more" suffix always survive.
+  if (tooltip.length > 256) tooltip = head + byProject((p) => p.label)
+  if (tooltip.length > 256) {
+    const fixed = (head + byProject(() => '')).length
+    const share = Math.max(1, Math.floor((256 - fixed) / shown.length))
+    tooltip = head + byProject((p) => (p.label.length <= share ? p.label : p.label.slice(0, share - 1) + '…'))
+  }
+  if (tooltip.length > 256) tooltip = tooltip.slice(0, 255) + '…'
   return {
     visible: true,
     text: `${live} subagent${live === 1 ? '' : 's'}`,
