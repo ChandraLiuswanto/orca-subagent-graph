@@ -2,7 +2,7 @@
   "manifestVersion": 2,
   "id": "subagent-graph",
   "name": "Subagent Graph",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Counts your Orca orchestration subagents in the status bar and draws them as a nested graph, for this machine and paired Orca servers.",
   "license": "MIT",
   "engines": {
@@ -58,6 +58,9 @@
   "capabilities": [
     {
       "kind": "settings:own"
+    },
+    {
+      "kind": "storage:own"
     }
   ]
 }

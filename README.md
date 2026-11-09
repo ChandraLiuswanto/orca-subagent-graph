@@ -9,6 +9,20 @@ Data comes from the `orca` CLI (`orchestration worker-list / worker-show / task-
 
 Pi's in-session subagents (pi-subagents) aren't recorded by Orca's orchestration, so they don't appear here.
 
+## What it loads
+
+While the panel is closed or hidden, the worker loads only what the status bar count needs. Live loads details for live and recent runs; History loads its selected range when you open it. Settled worker details are cached across restarts. Each host polls independently, so a slow paired server does not hold up local results. Use the refresh button to request a new pass; the header shows when hosts last answered.
+
+## 0.4.0
+
+This update adds `storage:own` to save worker details across restarts. Orca asks for approval again after updating, and the update will not activate until you approve it. If storage is unavailable, the worker keeps an in-memory cache for the current session.
+
+To reset saved details and closed-terminal knowledge in a development plugin, call `graph.clearCache`:
+
+    orca plugin dev request . graph.clearCache --json
+
+The next passes rebuild the cache from the CLI.
+
 ## Install
 
 Orca → Settings → Plugins → Install plugin → **Git URL**:
