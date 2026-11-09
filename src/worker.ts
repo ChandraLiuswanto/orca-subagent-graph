@@ -173,11 +173,31 @@ export default function activate(orca: OrcaWorkerApi): void {
     }
   }
 
+  // The panel times out at 20s. A first collect against a big history (one worker-show per worker)
+  // or a slow paired server can take longer, so answer with what we have and let graph.changed
+  // trigger a reload once the collect finishes.
+  const READ_DEADLINE_MS = 12000
+  async function settle(p: Promise<Snapshot>): Promise<Snapshot> {
+    let t: ReturnType<typeof setTimeout> | undefined
+    const late = new Promise<null>((r) => (t = setTimeout(() => r(null), READ_DEADLINE_MS)))
+    const won = await Promise.race([p, late]).finally(() => clearTimeout(t))
+    if (won) return won
+    p.then((s) => {
+      latest = s
+      orca.panels.post('graph.changed', { at: s.at })
+    }, () => {})
+    if (latest) return latest
+    const empty = buildRuns([])
+    empty.error = 'Still loading subagents from the Orca CLI…'
+    return empty
+  }
+
   orca.panels.handle('graph.read', async (input) => {
     const { range: r, view } = (input ?? {}) as { range?: string; view?: string }
     const live = view === 'live'
     const days = live ? 7 : RANGES[String(r ?? '7d')] ?? 7
-    const snap = days > 7 ? await refresh(5) : latest && Date.now() - latest.at < POLL_MS ? latest : await refresh()
+    const fresh = latest && Date.now() - latest.at < POLL_MS && days <= 7
+    const snap = fresh ? latest! : await settle(refresh(days > 7 ? 5 : 1))
     const cutoff = Date.now() - days * 86400000
     // Live: active + finished within RECENT_MS, every project. History: the range.
     const runs = live ? liveRuns(snap.runs) : snap.runs.filter((x) => !(toMs(x.createdAt) < cutoff))

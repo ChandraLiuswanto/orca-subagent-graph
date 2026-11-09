@@ -55,17 +55,19 @@ export class Collector {
     }
 
     // Task titles: per run, refreshed when a task id is new.
-    for (const runId of runIds) {
+    const stale = [...runIds].filter((runId) => {
       const known = this.titles.get(host + runId)
-      const need = workers.some((w) => w.runId === runId && !known?.has(w.taskId))
-      if (!need) continue
+      return workers.some((w) => w.runId === runId && !known?.has(w.taskId))
+    })
+    await lanes(stale, 6, async (runId) => {
+      const known = this.titles.get(host + runId)
       const res = await this.cli(['orchestration', 'task-list', '--run', runId, ...env]).catch(() => null)
       const map = new Map<string, string>(known ?? [])
       for (const t of res?.tasks ?? []) map.set(t.id, t.title)
       // Remember misses too, so a task the list does not return is not refetched every tick.
       for (const w of workers) if (w.runId === runId && !map.has(w.taskId)) map.set(w.taskId, '')
       this.titles.set(host + runId, map)
-    }
+    })
 
     // worker-show for: never seen, still running, or settled but terminal maybe still open.
     const shows = workers.filter((w) => {
