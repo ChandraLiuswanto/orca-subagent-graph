@@ -115,7 +115,10 @@ export class Scheduler {
       host: host.name,
       state: host.inFlight && (host.passKind !== 'tick' || host.okAt === undefined)
         ? 'loading' : host.reason !== undefined ? (host.published ? 'stale' : 'error') : 'ok',
-      reason: host.reason, okAt: host.okAt, retryAt: host.retryAt,
+      // Panel responses must be JSON values, including optional properties.
+      ...(host.reason !== undefined ? { reason: host.reason } : {}),
+      ...(host.okAt !== undefined ? { okAt: host.okAt } : {}),
+      ...(host.retryAt !== undefined ? { retryAt: host.retryAt } : {}),
       partial: host.partial, forced: host.forced, calls: this.opts.calls(host.name),
     }))
   }

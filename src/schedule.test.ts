@@ -42,6 +42,36 @@ function harness(names = ['local', 'remote']) {
   }
 }
 
+test('host status stays JSON-safe while loading, successful, failed, and recovered', async () => {
+  const h = harness(['remote'])
+  const check = () => {
+    const status = h.scheduler.status()
+    // JSON.stringify drops undefined properties; the panel bridge rejects them.
+    assert.deepEqual(status, JSON.parse(JSON.stringify(status)))
+    return status[0]
+  }
+  try {
+    await h.start()
+    assert.equal(check().state, 'loading')
+    h.passes[0].done.resolve(empty()); await flush()
+    assert.equal(check().okAt, 0)
+    await h.advance(15000)
+    h.passes[1].done.reject(new Error('offline')); await flush()
+    const failed = check()
+    assert.equal(failed.reason, 'offline')
+    assert.equal(failed.retryAt, 45000)
+    await h.advance(30000)
+    h.passes[2].done.resolve(empty()); await flush()
+    const recovered = check()
+    assert.equal(recovered.state, 'ok')
+    assert.equal(recovered.okAt, 45000)
+    assert.equal('reason' in recovered, false)
+    assert.equal('retryAt' in recovered, false)
+  } finally {
+    h.scheduler.stop()
+  }
+})
+
 test('per-host loops keep local moving while remote hangs; routine ticks stay ok', async () => {
   const h = harness(); await h.start()
   assert.equal(h.passes.length, 2)
