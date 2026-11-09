@@ -1,41 +1,63 @@
 # Subagent Graph (Orca plugin)
 
-Shows how many Orca orchestration subagents you have and draws them as a nested graph.
+Counts your Orca orchestration subagents in the status bar and draws each run as a nested graph: coordinator, then the workers it started, then the workers they started. It can watch this machine and any paired Orca servers, so a Windows desktop can show the workers running on a headless Linux box.
 
-- **Status bar chip:** "N subagents" counts running workers plus idle ones whose terminal is still open. It's hidden at 0, and the tooltip shows running vs idle and how deep the nesting goes.
-- **Subagents panel** (right sidebar): **Live** shows runs with running or idle workers, plus runs that finished in the last hour, for every project (if there are none, it falls back to each project's newest run). **History** shows all runs in a range (24h, 7d, 30d or All). Runs are grouped under collapsible project headers. Each run is a collapsible tree: coordinator, then workers, then the workers they started. Follow-ups sent to the same worker fold into one node. Nodes have status chips and durations, and there's a search box. Click a node for details and a **Focus terminal** button.
+<img src="docs/screenshot.png" alt="The Subagents panel in History view: a coordinator with two reviewer workers, each of which started two workers of its own, with one nested worker expanded to show its dispatch, task, terminal and timing" width="440">
 
-Data comes from the `orca` CLI (`orchestration worker-list / worker-show / task-list / run-list`), so it works on Windows, macOS and Linux. It also covers **paired Orca servers**: with the default `hosts = auto`, it watches this machine plus every server in `orca environment list`, for example a Windows desktop watching a headless Linux box.
+## Install
 
-Pi's in-session subagents (pi-subagents) aren't recorded by Orca's orchestration, so they don't appear here.
+In Orca, open Settings → Plugins → Install plugin → Git URL and paste:
 
-## What it loads
+    https://github.com/ChandraLiuswanto/orca-subagent-graph
 
-While the panel is closed or hidden, the worker loads only what the status bar count needs. Live loads details for live and recent runs; History loads its selected range when you open it. Settled worker details are cached across restarts. Each host polls independently, so a slow paired server does not hold up local results. Use the refresh button to request a new pass; the header shows when hosts last answered.
+Or from a terminal:
 
-## 0.4.0
+    orca plugin install ChandraLiuswanto/orca-subagent-graph
 
-This update adds `storage:own` to save worker details across restarts. Orca asks for approval again after updating, and the update will not activate until you approve it. If storage is unavailable, the worker keeps an in-memory cache for the current session.
+The CLI stops with `approval_required` and prints the same command with an `--approve` fingerprint. Run that command to finish.
 
-To reset saved details and closed-terminal knowledge in a development plugin, call `graph.clearCache`:
+The plugin runs a small background worker that calls the `orca` CLI, so Orca asks you to approve full access before it starts. Enable it, then open Subagents in the right sidebar.
+
+Plugins run in the Orca desktop app. A headless `orca serve` runtime has no plugin service, but the desktop app can still watch it as a paired server.
+
+## What you see
+
+The status bar shows "N subagents", where N is running workers plus idle workers whose terminal is still open. The item is hidden when N is 0 and shows `subagents ?` when no host answers. Its tooltip splits the count into running and idle, lists up to three projects with active workers, and says how deep the nesting goes. Clicking it toggles the right sidebar.
+
+The Subagents panel has two views:
+
+- Live shows runs with running or idle workers, plus runs that finished in the last hour, across every project. If there are none, it shows each project's newest run instead.
+- History shows every run in a range: 24h, 7d, 30d or All.
+
+Runs are grouped under collapsible project headers, and each run is a collapsible tree. Follow-ups sent to the same worker fold into one node. Nodes show a status and a duration, and a search box filters them. Click a node for its details and a Focus terminal button.
+
+Subagents started inside a Pi session (pi-subagents) don't appear, because Orca's orchestration never records them.
+
+## Settings
+
+- Orca hosts to watch: `auto` (the default) watches this machine plus every server in `orca environment list`. You can also give a comma-separated list such as `local,fedora`, using the names from that command.
+- Orca CLI path: only needed if the plugin can't find `orca.exe` or `orca` on its own.
+
+## How it gets its data
+
+Everything comes from the `orca` CLI (`orchestration worker-list`, `worker-show`, `task-list` and `run-list`), so the plugin works the same on Windows, macOS and Linux.
+
+The worker does only as much as the open view needs. With the panel closed or hidden, it fetches just enough for the status bar count. Live loads details for live and recent runs, and History loads its range when you open it. Each host polls on its own, so a slow paired server doesn't hold up local results. The refresh button asks for a new pass, and the panel header shows when each host last answered.
+
+Details for finished workers are saved with `storage:own` and reused after a restart. If storage isn't available, the worker keeps them in memory for the session.
+
+## Upgrading to 0.4.0
+
+0.4.0 added the `storage:own` capability. Orca asks you to approve again after the update, and the new version won't run until you do.
+
+## Development
+
+Run the tests:
+
+    node --test src/*.test.ts
+
+To clear saved details and what the worker knows about closed terminals in a development plugin:
 
     orca plugin dev request . graph.clearCache --json
 
 The next passes rebuild the cache from the CLI.
-
-## Install
-
-Orca → Settings → Plugins → Install plugin → **Git URL**:
-
-    https://github.com/ChandraLiuswanto/orca-subagent-graph
-
-Enable it and approve full access (it runs a small background worker that calls the `orca` CLI). Then open **Subagents** in the right sidebar.
-
-### Settings
-
-- **Orca hosts to watch:** `auto` (default), or a list such as `local,fedora`, using the names from `orca environment list`.
-- **Orca CLI path:** only needed if `orca.exe` / `orca` isn't found automatically.
-
-## Test
-
-    node --test src/*.test.ts
