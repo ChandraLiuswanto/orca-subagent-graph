@@ -208,6 +208,64 @@ for (const settled of [
   assert.deepEqual(f.shows(), ['1', '1'])
 })
 
+for (const missing of [false, true]) test(`null completion gets only one settled refresh, missing terminal: ${missing}`, async () => {
+  const workers = [openWorker('1', { dispatchStatus: 'dispatched' })]
+  const f = fixture(workers, { response(args) {
+    if (args[1] === 'worker-show') return show(missing ? null : { handle: 'h1', exitCause: { kind: 'exited' } }, workers[0].dispatchStatus, {
+      dispatch: { createdAt: iso(NOW - DAY), completedAt: null, status: workers[0].dispatchStatus },
+    })
+  } })
+  await f.collector.rows('local', count)
+  Object.assign(workers[0], { dispatchStatus: 'completed', ...(!missing ? { resource: { releaseState: 'released', terminalHandle: 'h1' } } : {}) })
+  for (let pass = 0; pass < 4; pass++) {
+    f.advance(60000)
+    const result = await f.collector.rows('local', count)
+    assert.equal(result.rows[0].completed_at, null)
+  }
+  assert.deepEqual(f.shows(), ['1', '1'])
+  if (missing) {
+    f.advance(419999); await f.collector.rows('local', count)
+    assert.deepEqual(f.shows(), ['1', '1'])
+    f.advance(1); await f.collector.rows('local', count)
+    assert.deepEqual(f.shows(), ['1', '1', '1'])
+  }
+})
+
+test('failed settled refresh retries after 30s backoff, then stops on null completion', async () => {
+  const workers = [openWorker('1', { dispatchStatus: 'dispatched' })]
+  let fail = false
+  const f = fixture(workers, { response(args) {
+    if (args[1] !== 'worker-show') return
+    if (fail) throw Error('timeout')
+    return show(null, workers[0].dispatchStatus, { dispatch: { completedAt: null } })
+  } })
+  await f.collector.rows('local', count)
+  Object.assign(workers[0], { dispatchStatus: 'completed', resource: { releaseState: 'released' } })
+  fail = true; await f.collector.rows('local', count)
+  fail = false; f.advance(29999); await f.collector.rows('local', count)
+  assert.deepEqual(f.shows(), ['1', '1'])
+  f.advance(1); await f.collector.rows('local', count)
+  await f.collector.rows('local', count)
+  assert.deepEqual(f.shows(), ['1', '1', '1'])
+})
+
+for (const reset of ['clear', 'run reuse']) test(`settled refresh allowance resets on ${reset}`, async () => {
+  const workers = [worker('1')]
+  const f = fixture(workers, { response(args) {
+    if (args[1] === 'worker-show') return show(null, 'completed', { dispatch: { completedAt: null } })
+  } })
+  // History supplies the initial details for an already released worker.
+  await f.collector.rows('local', all)
+  await f.collector.rows('local', count)
+  assert.deepEqual(f.shows(), ['1', '1'])
+  if (reset === 'clear') f.collector.clear()
+  else workers[0].runId = 'another-run'
+  await f.collector.rows('local', all)
+  await f.collector.rows('local', count)
+  await f.collector.rows('local', count)
+  assert.deepEqual(f.shows(), ['1', '1', '1', '1'])
+})
+
 test('publishes page-one short rows before page two resolves', async () => {
   let resolve!: (v: any) => void, started!: () => void
   const began = new Promise<void>(r => { started = r })

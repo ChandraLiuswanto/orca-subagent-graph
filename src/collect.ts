@@ -16,6 +16,7 @@ const rankTime = (s: string | undefined) => Number.isFinite(time(s)) ? time(s) :
 
 export class Collector {
   private statics = new Map<string, Entry>()
+  private settledTried = new Set<string>()
   private closed = new Map<string, Closed>()
   private missing = new Map<string, number>()
   private titles = new Map<string, Map<string, string>>()
@@ -34,7 +35,7 @@ export class Collector {
 
   clear(): void {
     this.epoch++
-    this.statics.clear(); this.closed.clear(); this.missing.clear(); this.titles.clear()
+    this.statics.clear(); this.settledTried.clear(); this.closed.clear(); this.missing.clear(); this.titles.clear()
     this.objectives.clear(); this.runCreated.clear(); this.lastOpen.clear(); this.backoff.clear(); this.runListAt.clear()
   }
 
@@ -116,7 +117,7 @@ export class Collector {
         }
         // A dispatch id reused for another run cannot inherit this session's details either.
         const s = this.statics.get(k)
-        if (s && s.run !== w.runId) { this.statics.delete(k); this.closed.delete(k); this.missing.delete(k); this.lastOpen.delete(k); this.store?.drop(host, w.dispatchId) }
+        if (s && s.run !== w.runId) { this.statics.delete(k); this.settledTried.delete(k); this.closed.delete(k); this.missing.delete(k); this.lastOpen.delete(k); this.store?.drop(host, w.dispatchId) }
       }
       invalidate()
       publish()
@@ -144,15 +145,17 @@ export class Collector {
       const k = key(w.dispatchId), s = this.statics.get(k)
       if ((this.backoff.get(k) ?? 0) > this.now()) return false
       // Details cached while active need one final refresh even after release/exit.
-      return (active(w) && !s) || (!active(w) && !!s && !s.d) || possible(w, i)
+      return (active(w) && !s) || (!active(w) && !!s && !s.d && !this.settledTried.has(k)) || possible(w, i)
     })
     const probe = async (w: any) => {
       if (!alive()) return
       const k = key(w.dispatchId)
       if ((this.backoff.get(k) ?? 0) > this.now()) return
+      const s = this.statics.get(k)
+      if (!active(w) && s && !s.d) this.settledTried.add(k)
       const res = await call(['worker-show', '--dispatch', w.dispatchId, '--full']).catch(() => null)
       if (!alive()) return
-      if (!res) { this.backoff.set(k, this.now() + 30000); publish(); return }
+      if (!res) { this.backoff.set(k, this.now() + 30000); this.settledTried.delete(k); publish(); return }
       this.backoff.delete(k)
       const d = res.dispatch ?? {}, launch = res.worker?.startOptions?.launch?.effective ?? {}
       const e: Entry = { run: w.runId, c: d.createdAt ?? '', cr: d.creatorDispatchId ?? null,
