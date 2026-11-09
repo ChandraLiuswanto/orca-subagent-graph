@@ -19,11 +19,13 @@
         <option value="all">All</option>
       </select>
       <span id="summary" class="mut"></span>
+      <span id="updated" class="mut"></span><button id="refresh" class="icon" title="Refresh now" aria-label="Refresh now">↻</button>
     </header>
     <div class="tools">
       <input id="search" type="search" placeholder="Search tasks, runs, projects, models, ids" aria-label="Search" autocomplete="off" spellcheck="false" />
       <div id="filters" class="chips" role="toolbar" aria-label="Filter by status"></div>
     </div>
+    <div id="hosts" class="hosts" hidden></div>
     </div>
     <main id="app"></main>
     <div id="toast" class="toast" hidden></div>

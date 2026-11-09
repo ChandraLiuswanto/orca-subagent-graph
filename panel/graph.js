@@ -1,6 +1,7 @@
 // Indented tree as nested HTML lists: coordinator -> workers -> nested workers. Any depth fits a
 // narrow sidebar, and a node's details expand inline under it.
-// Exposes window.SGGraph = { render, ago, duration, toMs, glyph, nodeMs, esc }.
+// Exposes window.SGGraph = { render, ago, duration, toMs, glyph, nodeMs, esc, hostLines, updatedLabel,
+// updatedTitle, createLoader }.
 ;(function () {
   function toMs(v) {
     if (typeof v === 'number') return v
@@ -8,10 +9,10 @@
     return Date.parse(v.indexOf('T') > 0 ? v : v.replace(' ', 'T') + 'Z')
   }
 
-  function ago(v) {
+  function ago(v, now) {
     var t = toMs(v)
     if (!isFinite(t)) return ''
-    var s = Math.max(0, (Date.now() - t) / 1000)
+    var s = Math.max(0, ((now === undefined ? Date.now() : now) - t) / 1000)
     if (s < 60) return Math.round(s) + 's ago'
     if (s < 3600) return Math.round(s / 60) + 'm ago'
     if (s < 86400) return Math.round(s / 3600) + 'h ago'
@@ -34,6 +35,66 @@
   function nodeMs(n, now) {
     var start = toMs(n.createdAt)
     return n.phase === 'running' ? (now === undefined ? Date.now() : now) - start : toMs(n.completedAt) - start
+  }
+
+  /** Status lines for hosts that are not ok or only partially loaded. */
+  function hostLines(hostStatus, now) {
+    var out = []
+    ;(hostStatus || []).forEach(function (s) {
+      if (s.state === 'stale' || s.state === 'error') {
+        var retry = s.retryAt > now ? ', retrying in ' + Math.max(1, Math.round((s.retryAt - now) / 1000)) + 's' : ''
+        out.push(s.host + ': ' + (s.reason || 'unreachable') + retry)
+      } else if (s.state === 'loading') {
+        out.push(s.host + ': loading…')
+      }
+      if (s.partial) out.push(s.host + ': showing the newest 100 workers; older ones may be missing')
+    })
+    return out
+  }
+
+  function updatedLabel(hostStatus, now) {
+    if (!hostStatus || !hostStatus.length) return ''
+    var min = Infinity
+    for (var i = 0; i < hostStatus.length; i++) {
+      var t = hostStatus[i].okAt
+      if (typeof t !== 'number') return 'not loaded yet'
+      if (t < min) min = t
+    }
+    return 'updated ' + ago(min, now)
+  }
+
+  function updatedTitle(hostStatus) {
+    return (hostStatus || []).map(function (s) {
+      return s.host + ': ' + (typeof s.okAt === 'number' ? ago(s.okAt) : 'not loaded yet')
+    }).join('\n')
+  }
+
+  /**
+   * One request at a time. Hidden panels never request (and never force); they remember to refresh when
+   * shown again. Calls during a request collapse into one follow-up request.
+   */
+  function createLoader(o) {
+    var busy = false, again = false, againForce = false, skipped = false
+    function load(force) {
+      if (o.isHidden()) { skipped = true; return }
+      if (busy) { again = true; againForce = againForce || !!force; return }
+      busy = true
+      var p
+      try { p = Promise.resolve(o.request({ force: !!force })) } catch (e) { p = Promise.reject(e) }
+      p.then(o.onSnap, o.onError).then(function () {}, function () {}).then(function () {
+        busy = false
+        if (again) {
+          var f = againForce
+          again = false
+          againForce = false
+          load(f)
+        }
+      })
+    }
+    function visible() {
+      if (skipped) { skipped = false; load(false) }
+    }
+    return { load: load, visible: visible }
   }
 
   function fmtTime(v) {
@@ -70,9 +131,9 @@
       ['Task', n.taskId ? '<code>' + esc(n.taskId) + '</code>' : '—'],
       ['Terminal', n.terminal ? '<code>' + esc(n.terminal) + '</code>' : '—'],
       ['Agent', esc(n.agent || 'agent') + (n.model ? ' · ' + esc(n.model) : '')],
-      ['Created', esc(fmtTime(n.createdAt))],
-      ['Completed', n.phase === 'running' ? 'still running' : esc(fmtTime(n.completedAt))],
-      ['Duration', esc(duration(nodeMs(n)) || '—')],
+      ['Created', n.loading ? 'loading…' : esc(fmtTime(n.createdAt))],
+      ['Completed', n.loading ? 'loading…' : n.phase === 'running' ? 'still running' : esc(fmtTime(n.completedAt))],
+      ['Duration', n.loading ? 'loading…' : esc(duration(nodeMs(n)) || '—')],
       ['Follow-ups', esc(n.followUps || 0)]
     ]
     if (n.host && n.host !== 'local') rows.push(['Host', esc(n.host)])
@@ -92,20 +153,23 @@
   }
 
   function nodeLi(n, opts) {
-    var li = h('li', n.phase + (n.ctx ? ' ctx' : ''))
+    var li = h('li', n.phase + (n.ctx ? ' ctx' : '') + (n.loading ? ' loading' : ''))
     var key = (n.host || '') + ':' + n.id
     var open = opts.isOpen(key)
-    var card = h('div', 'card ' + n.phase)
+    var card = h('div', 'card ' + n.phase + (n.loading ? ' loading' : ''))
     card.setAttribute('role', 'button')
     card.setAttribute('tabindex', '0')
     card.setAttribute('aria-expanded', open ? 'true' : 'false')
     card.dataset.key = key
     var bits = ['<span class="ph">' + esc(n.phase) + '</span>']
     var ms = nodeMs(n)
-    if (n.phase === 'running') bits.push('<span class="dur" data-start="' + esc(toMs(n.createdAt)) + '">' + esc(duration(ms)) + '</span>')
+    if (n.loading) bits.push('loading…')
+    else if (n.phase === 'running') bits.push('<span class="dur" data-start="' + esc(toMs(n.createdAt)) + '">' + esc(duration(ms)) + '</span>')
     else if (duration(ms)) bits.push('<span class="dur">' + esc(duration(ms)) + '</span>')
-    bits.push(esc(n.agent || 'agent'))
-    if (n.model) bits.push(esc(n.model))
+    if (!n.loading) {
+      bits.push(esc(n.agent || 'agent'))
+      if (n.model) bits.push(esc(n.model))
+    }
     if (n.followUps) bits.push('+' + esc(n.followUps) + ' follow-up' + (n.followUps > 1 ? 's' : ''))
     card.innerHTML = glyph(n.phase) + '<div class="txt"><div class="title">' + esc(n.title) + '</div><div class="sub">' + bits.join(' · ') + '</div></div>'
     card.title = n.title + '\n' + n.id + '\nstate: ' + n.phase + ' (' + n.status + ')\n' +
@@ -138,5 +202,6 @@
     return tree
   }
 
-  window.SGGraph = { render: render, ago: ago, duration: duration, toMs: toMs, glyph: glyph, nodeMs: nodeMs, esc: esc }
+  window.SGGraph = { render: render, ago: ago, duration: duration, toMs: toMs, glyph: glyph, nodeMs: nodeMs, esc: esc,
+    hostLines: hostLines, updatedLabel: updatedLabel, updatedTitle: updatedTitle, createLoader: createLoader }
 })()

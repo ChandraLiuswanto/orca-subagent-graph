@@ -4,6 +4,9 @@
   var esc = G.esc
   var app = document.getElementById('app')
   var summary = document.getElementById('summary')
+  var updatedEl = document.getElementById('updated')
+  var refreshBtn = document.getElementById('refresh')
+  var hostsEl = document.getElementById('hosts')
   var rangeSel = document.getElementById('range')
   var searchEl = document.getElementById('search')
   var chipsEl = document.getElementById('filters')
@@ -174,6 +177,19 @@
     var t = snap.totals
     summary.textContent = (t.running + t.idle) + ' subagent' + (t.running + t.idle === 1 ? '' : 's') + ' · ' + t.running + ' running'
     prune(snap.knownProjects)
+    var hs = snap.hostStatus || []
+    var lines = G.hostLines(hs, Date.now())
+    hostsEl.textContent = ''
+    lines.forEach(function (l) {
+      var d = document.createElement('div')
+      d.className = 'hl' + (hs.some(function (x) { return (x.state === 'stale' || x.state === 'error') && l.indexOf(x.host + ': ') === 0 && l.indexOf('showing the newest') < 0 }) ? ' warn' : '')
+      d.textContent = l
+      hostsEl.appendChild(d)
+    })
+    hostsEl.hidden = !lines.length
+    updatedEl.textContent = G.updatedLabel(hs, Date.now())
+    updatedEl.title = G.updatedTitle(hs)
+    refreshBtn.disabled = hs.some(function (x) { return x.forced })
 
     var projects = (snap.projects || []).map(function (p) {
       var o = {}
@@ -261,22 +277,22 @@
     })
   }
 
-  function load() {
-    if (!api || !api.plugin) return
-    if (view.busy) { view.again = true; return }
-    view.busy = true
-    var range = view.mode === 'live' ? '7d' : view.range
-    api.plugin.request('graph.read', { range: range, view: view.mode }, { timeoutMs: 20000 }).then(function (snap) {
-      view.busy = false
+  var loader = G.createLoader({
+    request: function (o) {
+      if (!api || !api.plugin) return Promise.reject(new Error('Worker unavailable'))
+      var range = view.mode === 'live' ? '7d' : view.range
+      return api.plugin.request('graph.read', { range: range, view: view.mode, force: o.force }, { timeoutMs: 20000 })
+    },
+    isHidden: function () { return document.hidden },
+    onSnap: function (snap) {
       if (snap && Array.isArray(snap.runs) && snap.totals) draw(snap)
       else app.innerHTML = '<div class="err">' + esc((snap && snap.error) || 'No data from the worker') + '</div>'
-      if (view.again) { view.again = false; load() }
-    }, function (err) {
-      view.busy = false
-      if (view.again) { view.again = false; setTimeout(load, 500) }
+    },
+    onError: function (err) {
       app.innerHTML = '<div class="err">' + esc((err && err.message) || 'Worker unavailable') + '</div>'
-    })
-  }
+    }
+  })
+  function load() { loader.load(false) }
 
   function setMode(mode) {
     view.mode = mode
@@ -307,14 +323,17 @@
   })
   searchEl.addEventListener('keydown', function (ev) { if (ev.key === 'Escape' && searchEl.value) { searchEl.value = ''; view.q = ''; if (view.last) draw(view.last) } })
 
-  if (api && api.plugin) api.plugin.on('graph.changed', load)
+  if (api && api.plugin) api.plugin.on('graph.changed', function () { loader.load(false) })
+  refreshBtn.addEventListener('click', function () { loader.load(true) })
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) loader.visible() })
   setMode(view.mode)
   // Running durations tick every second without a reload.
   setInterval(function () {
     if (document.hidden) return
+    if (view.last) updatedEl.textContent = G.updatedLabel(view.last.hostStatus || [], Date.now())
     var els = document.querySelectorAll('.dur[data-start]')
     for (var i = 0; i < els.length; i++) els[i].textContent = G.duration(Date.now() - Number(els[i].dataset.start))
   }, 1000)
   // Relative times stay fresh even when nothing changed.
-  setInterval(function () { if (!document.hidden) load() }, 15000)
+  setInterval(function () { loader.load(false) }, 15000)
 })()
