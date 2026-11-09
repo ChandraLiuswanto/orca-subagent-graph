@@ -49,38 +49,6 @@ export class Collector {
     const width = host === 'local' ? 6 : 2
     const workers: any[] = []
     let cursor: string | null = null, partial = false
-    for (let page = 0; page < pagesFor(level); page++) {
-      if (!alive()) return empty()
-      if (page && !wanted()) break
-      let res: any
-      try { res = await call(['worker-list', '--full', '--limit', '100', ...(cursor ? ['--cursor', cursor] : [])]) }
-      catch (error) { if (!alive()) return empty(); if (!page) throw error; partial = true; break }
-      if (!alive()) return empty()
-      workers.push(...(res?.workers ?? []))
-      cursor = res?.nextCursor ?? null
-      partial = !!(res?.page?.hasMore || cursor)
-      if (!cursor) break
-    }
-
-    for (const w of workers) {
-      if (!alive()) return empty()
-      const k = key(w.dispatchId)
-      const saved = this.store?.get(host, w.dispatchId)
-      if (saved) this.store?.touch(host, w.dispatchId)
-      if (!this.statics.has(k)) {
-        if (saved) {
-          if (saved.run !== w.runId || active(w)) this.store?.drop(host, w.dispatchId)
-          else {
-            this.statics.set(k, { ...saved })
-            if (saved.th !== undefined && saved.ex !== undefined && saved.xt !== undefined) this.closed.set(k, { th: saved.th, ex: saved.ex, xt: saved.xt })
-          }
-        }
-      }
-      // A dispatch id reused for another run cannot inherit this session's details either.
-      const s = this.statics.get(k)
-      if (s && s.run !== w.runId) { this.statics.delete(k); this.closed.delete(k); this.missing.delete(k); this.lastOpen.delete(k); this.store?.drop(host, w.dispatchId) }
-    }
-
     const trusted = (w: any, index: number): boolean => {
       const proof = this.closed.get(key(w.dispatchId)), h = handleOf(w)
       if (!proof || !h || active(w) || proof.th !== h || w.projection?.liveness?.verdict === 'live') return false
@@ -106,7 +74,6 @@ export class Collector {
         }
       }
     }
-    invalidate()
     const mapRows = (): Row[] => workers.map((w, i) => {
       const k = key(w.dispatchId), s = this.statics.get(k), release = w.resource?.releaseState ?? null
       return {
@@ -121,8 +88,41 @@ export class Collector {
         run_created_at: this.runCreated.get(key(w.runId)) ?? null,
       }
     })
-    if (!alive()) return empty()
-    onRows?.({ rows: mapRows(), partial })
+    const publish = () => { if (alive()) onRows?.({ rows: mapRows(), partial }) }
+    for (let page = 0; page < pagesFor(level); page++) {
+      if (!alive()) return empty()
+      if (page && !wanted()) break
+      let res: any
+      try { res = await call(['worker-list', '--full', '--limit', '100', ...(cursor ? ['--cursor', cursor] : [])]) }
+      catch (error) { if (!alive()) return empty(); if (!page) throw error; partial = true; break }
+      if (!alive()) return empty()
+      const added = res?.workers ?? []
+      workers.push(...added)
+      cursor = res?.nextCursor ?? null
+      partial = !!(res?.page?.hasMore || cursor)
+      for (const w of added) {
+        if (!alive()) return empty()
+        const k = key(w.dispatchId)
+        const saved = this.store?.get(host, w.dispatchId)
+        if (saved) this.store?.touch(host, w.dispatchId)
+        if (!this.statics.has(k)) {
+          if (saved) {
+            if (saved.run !== w.runId || active(w)) this.store?.drop(host, w.dispatchId)
+            else {
+              this.statics.set(k, { ...saved })
+              if (saved.th !== undefined && saved.ex !== undefined && saved.xt !== undefined) this.closed.set(k, { th: saved.th, ex: saved.ex, xt: saved.xt })
+            }
+          }
+        }
+        // A dispatch id reused for another run cannot inherit this session's details either.
+        const s = this.statics.get(k)
+        if (s && s.run !== w.runId) { this.statics.delete(k); this.closed.delete(k); this.missing.delete(k); this.lastOpen.delete(k); this.store?.drop(host, w.dispatchId) }
+      }
+      invalidate()
+      publish()
+      if (!cursor) break
+    }
+
     if (!alive()) return empty()
     const runIds = [...new Set<string>(workers.map(w => w.runId))]
     if (level.kind !== 'count' && wanted() && runIds.some(id => !this.runCreated.has(key(id))) &&
@@ -134,19 +134,25 @@ export class Collector {
         if (typeof r.objective === 'string') this.objectives.set(key(r.id), r.objective)
         if (typeof r.created_at === 'string') this.runCreated.set(key(r.id), r.created_at)
       }
+      publish()
     }
 
     const possible = (w: any, i: number) => !active(w) && !!handleOf(w) && w.resource?.releaseState !== 'released' &&
       w.projection?.liveness?.verdict !== 'exited' && !trusted(w, i) &&
       this.now() - (this.missing.get(key(w.dispatchId)) ?? -Infinity) >= 600000
-    const countWorkers = workers.filter((w, i) => (active(w) && !this.statics.has(key(w.dispatchId))) || possible(w, i))
+    const countWorkers = workers.filter((w, i) => {
+      const k = key(w.dispatchId), s = this.statics.get(k)
+      if ((this.backoff.get(k) ?? 0) > this.now()) return false
+      // Details cached while active need one final refresh even after release/exit.
+      return (active(w) && !s) || (!active(w) && !!s && !s.d) || possible(w, i)
+    })
     const probe = async (w: any) => {
       if (!alive()) return
       const k = key(w.dispatchId)
       if ((this.backoff.get(k) ?? 0) > this.now()) return
       const res = await call(['worker-show', '--dispatch', w.dispatchId, '--full']).catch(() => null)
       if (!alive()) return
-      if (!res) { this.backoff.set(k, this.now() + 30000); return }
+      if (!res) { this.backoff.set(k, this.now() + 30000); publish(); return }
       this.backoff.delete(k)
       const d = res.dispatch ?? {}, launch = res.worker?.startOptions?.launch?.effective ?? {}
       const e: Entry = { run: w.runId, c: d.createdAt ?? '', cr: d.creatorDispatchId ?? null,
@@ -161,6 +167,7 @@ export class Collector {
       } else this.missing.set(k, this.now())
       this.statics.set(k, e)
       if (settled) this.store?.put(host, w.dispatchId, e, gen)
+      publish()
     }
     // Count work always completes; level-only calls are checked at dequeue time.
     await lanes(countWorkers.map(w => ({ w, needs: 'count' as const })), width, async item => { if (alive()) await probe(item.w) })
@@ -197,6 +204,7 @@ export class Collector {
       for (const t of res?.tasks ?? []) known.set(t.id, t.title)
       for (const w of workers) if (w.runId === id && !known.has(w.taskId)) known.set(w.taskId, '')
       this.titles.set(key(id), known)
+      publish()
     })
     if (!alive()) return empty()
     return { rows: mapRows(), partial }

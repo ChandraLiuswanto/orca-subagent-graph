@@ -187,6 +187,81 @@ test('demand lapse after first page skips history pages and run-list', async () 
   assert.equal(r.partial, true); assert.deepEqual(f.calls.map(a => a[1]), ['worker-list'])
 })
 
+for (const settled of [
+  { resource: { releaseState: 'released' } },
+  { projection: { liveness: { verdict: 'exited' } } },
+]) test(`active details refresh once after settling: ${JSON.stringify(settled)}`, async () => {
+  const workers = [openWorker('1', { dispatchStatus: 'dispatched' })], m = memory()
+  const f = fixture(workers, { store: m.store, response(args) {
+    if (args[1] === 'worker-show' && workers[0].dispatchStatus === 'dispatched') {
+      return show({ connected: true }, 'dispatched', { dispatch: { createdAt: iso(NOW - DAY), completedAt: null, status: 'dispatched' } })
+    }
+  } })
+  const first = await f.collector.rows('local', count)
+  assert.equal(first.rows[0].completed_at, null); assert.equal(m.puts.length, 0)
+  Object.assign(workers[0], { dispatchStatus: 'completed', ...settled })
+  const second = await f.collector.rows('local', count)
+  assert.deepEqual(f.shows(), ['1', '1'])
+  assert.equal(second.rows[0].completed_at, iso(NOW - 2 * 3600000))
+  assert.equal(m.entries.get('local1')?.d, second.rows[0].completed_at)
+  await f.collector.rows('local', count)
+  assert.deepEqual(f.shows(), ['1', '1'])
+})
+
+test('publishes page-one short rows before page two resolves', async () => {
+  let resolve!: (v: any) => void, started!: () => void
+  const began = new Promise<void>(r => { started = r })
+  const updates: any[] = []
+  const f = fixture([], { response(args) {
+    if (args[1] !== 'worker-list') return
+    if (!args.includes('--cursor')) return wl([worker('1')], { nextCursor: 'second' })
+    started(); return new Promise(r => { resolve = r })
+  } })
+  const pass = f.collector.rows('local', all, r => updates.push(r))
+  await began
+  const early = updates.slice()
+  resolve(wl([worker('2')]))
+  await pass
+  assert.equal(early.length, 1)
+  assert.equal(early[0].partial, true)
+  assert.deepEqual(early[0].rows.map((r: any) => [r.id, r.details]), [['1', false]])
+  assert.deepEqual(updates[1].rows.map((r: any) => r.id), ['1', '2'])
+  assert.equal(updates[1].partial, false)
+})
+
+test('publishes each completed worker-show with its new details', async () => {
+  const pending = new Map<string, (v: any) => void>()
+  let started!: () => void
+  const began = new Promise<void>(r => { started = r }), updates: any[] = []
+  const f = fixture([openWorker('1'), openWorker('2')], { response(args) {
+    if (args[1] !== 'worker-show') return
+    return new Promise(r => {
+      pending.set(args[args.indexOf('--dispatch') + 1], r)
+      if (pending.size === 2) started()
+    })
+  } })
+  const pass = f.collector.rows('local', count, r => updates.push(r))
+  await began
+  pending.get('2')!(show())
+  // Let the probe's await continuation publish before resolving the other show.
+  await new Promise<void>(r => setImmediate(r))
+  const afterOne = updates.slice()
+  pending.get('1')!(show())
+  await pass
+  assert.equal(afterOne.length, 2)
+  assert.deepEqual(afterOne[1].rows.map((r: any) => r.details), [false, true])
+  assert.equal(updates.length, 3)
+  assert.deepEqual(updates[2].rows.map((r: any) => r.details), [true, true])
+})
+
+test('publishes run-list and task-list enrichment as results arrive', async () => {
+  const updates: any[] = [], f = fixture([worker('1')])
+  await f.collector.rows('local', all, r => updates.push(r))
+  assert.deepEqual(updates.map(r => [r.rows[0].objective, r.rows[0].details, r.rows[0].title]), [
+    [null, false, null], ['Goal', false, null], ['Goal', true, null], ['Goal', true, 'Task'],
+  ])
+})
+
 test('failed shows back off for 30s and preserve prior open state', async () => {
   let fail = false
   const f = fixture([openWorker('1')], { terminal: { connected: true }, response(args) { if (fail && args[1] === 'worker-show') throw Error('timeout') } })
