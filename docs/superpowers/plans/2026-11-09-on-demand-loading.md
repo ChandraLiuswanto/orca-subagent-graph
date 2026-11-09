@@ -65,7 +65,7 @@ export type HostStatus = {
   hostStatus: HostStatus[] // buildRuns() returns [], worker.ts fills it in
 ```
 
-### Levels (Task 4 owns the type in `src/collect.ts`; Task 5 imports it)
+### Levels (Task 1 owns them in `src/model.ts`; Tasks 4 and 5 import them)
 
 ```ts
 export type Level = { kind: 'count' } | { kind: 'live' } | { kind: 'history'; days: number }
@@ -102,7 +102,7 @@ export class DetailStore {
   put(host: string, id: string, e: Entry, gen: number): void // ignored when gen !== generation
   drop(host: string, id: string): void
   touch(host: string, id: string): void // sets seen=now only if the old seen is > 1 day old; marks dirty then
-  clear(): Promise<void> // generation += 1, drop pending writes, delete every details:* key, empty memory
+  clear(): Promise<void> // SYNCHRONOUSLY, before its first await: generation += 1, cancel timers and dirty set, empty memory. Then delete every details:* key (serialized behind any in-flight set). Puts with the new generation made during the deletes are written after them.
   flushNow(): Promise<void> // best-effort immediate write of dirty hosts (deactivate)
 }
 ```
@@ -120,10 +120,10 @@ export function running(): number // children in flight (tests)
 ### `src/schedule.ts` (Task 5 owns)
 
 ```ts
-import type { Level } from './collect.ts'
-import type { HostStatus, Row } from './model.ts'
+import type { HostStatus, Level, Row } from './model.ts'
 export type PassResult = { rows: Row[]; partial: boolean }
-export type HostRunner = (host: string, level: Level, onRows: (r: PassResult) => void) => Promise<PassResult>
+/** `demand()` returns the level the panel wants right now (count once attention lapses). */
+export type HostRunner = (host: string, level: Level, onRows: (r: PassResult) => void, demand: () => Level) => Promise<PassResult>
 export const ATTENTION_MS = 30000
 export class Scheduler {
   constructor(opts: {
@@ -141,7 +141,7 @@ export class Scheduler {
   stop(): void
   ask(level: Level): void // panel attention + level raise
   force(): void
-  cancelQueued(): void // graph.clearCache
+  cancelQueued(): void // graph.clearCache; synchronous; bumps the scheduler epoch so results of passes started before it are dropped
   rows(): Row[] // latest rows of every host, merged
   status(): HostStatus[]
   hasData(): boolean
@@ -193,17 +193,15 @@ Built from `grep -n` over `src/` and `panel/` at `6f48647`.
 | 3 cli | `src/cli.ts`, `src/cli.test.ts` | none | W2 (Sol, medium) |
 | 7 panel | `panel/app.js`, `panel/graph.js`, `panel/index.html`, `panel/style.css`, `src/panel.test.ts` | none | W4 (Sonnet, low) |
 | 4 collect | `src/collect.ts`, `src/collect.test.ts` | 1, 2 | W1 |
-| 5 schedule | `src/schedule.ts`, `src/schedule.test.ts` | 1, 4 (imports `Level` type only; see note) | W2 |
+| 5 schedule | `src/schedule.ts`, `src/schedule.test.ts` | 1 | W2 |
 | 6 worker | `src/worker.ts`, `orca-plugin.json`, `README.md` | 3, 4, 5 | W2 |
 
-Note on 5 → 4: Task 5 only needs `Level`, `levelRank` and `pagesFor`. To let Task 5 start as soon as
-Task 1 lands, Task 4 MUST commit those three exports first (a first small commit inside Task 4's
-bead is fine), or Task 5 may define them in `schedule.ts` temporarily. Simplest rule: **Task 5 is
-blocked by 1 and 4.** If W2 is idle after Task 3, it may start Task 5 against the contract above
-with a local copy of `Level`/`levelRank`, then switch to importing from `collect.ts` before its commit
-once Task 4 is in.
+`Level`, `levelRank` and `pagesFor` live in `src/model.ts` (Task 1), so Tasks 4 and 5 both depend only
+on the small model contract and run in parallel with each other. Task 5 tests against a fake
+`HostRunner`; it never imports `collect.ts`.
 
-Heads that run in parallel at once: 1, 2, 3, 7.
+Heads that run in parallel at once: 1, 2, 3, 7. Then 4 (after 1, 2) and 5 (after 1) in parallel.
+Task 6 is the join.
 
 ---
 
@@ -212,7 +210,8 @@ Heads that run in parallel at once: 1, 2, 3, 7.
 **Files:** modify `src/model.ts`, `src/model.test.ts`.
 
 1. Add `run_created_at` and `details` to `Row`, `loading` to `Node`, `HostState`/`HostStatus` types,
-   `hostStatus` to `Snapshot` (exact shapes in Shared contracts).
+   `hostStatus` to `Snapshot`, and `Level`/`levelRank`/`pagesFor` (exact shapes in Shared
+   contracts). Test `levelRank` ordering (count < live < history 1 < 7 < 30 < 36500) and `pagesFor`.
 2. Update the test `row()` helper with `run_created_at: null, details: true`.
 3. `buildRuns`:
    - Sort key: `toMs(created_at)`, falling back to `toMs(run_created_at)`. A NaN key sorts as
@@ -278,11 +277,14 @@ Behaviour (spec R6):
 - **`storage === null`** (capability not granted): memory only, no log spam (one log line at
   construction).
 - **`clear()`:**
-  - `generation += 1`.
-  - Cancel the timers and pending dirty set. An in-flight `set` may finish, but it is followed
-    by deletes.
-  - Delete every `details:*` key from `keys()` and empty memory.
-  - `put` with an older `gen` is ignored.
+  - Synchronously, before the first `await`: `generation += 1`, cancel the timers and the pending
+    dirty set, and empty memory.
+  - Then, serialized behind any in-flight `set` (which may finish but is followed by the deletes):
+    delete every `details:*` key from `keys()`.
+  - `put` with an older `gen` is ignored. Puts with the new generation made during the deletes
+    stay in memory and are written after the deletes finish.
+  - Test: right after calling `clear()` (not awaited), `generation` is already bumped and `get`
+    returns undefined.
 - **`flushNow()`:** cancel the timers and write every dirty host now, in sequence. Resolves even
   on failure.
 
@@ -342,18 +344,31 @@ copies).
 API:
 
 ```ts
-export type Level = ... ; export function levelRank(l: Level): number ; export function pagesFor(l: Level): number
+import { levelRank, pagesFor, type Level } from './model.ts'
 export type Cli = (args: string[]) => Promise<any> // unchanged; worker binds timeouts per host
 export class Collector {
   constructor(cli: Cli, store?: DetailStoreLike, now?: () => number)
-  rows(host: string, level: Level, onRows?: (r: { rows: Row[]; partial: boolean }) => void): Promise<{ rows: Row[]; partial: boolean }>
-  clear(): void // empties statics, closed, missing, titles, objectives, runCreated, lastOpen, backoff
+  rows(host: string, level: Level, onRows?: (r: { rows: Row[]; partial: boolean }) => void, demand?: () => Level): Promise<{ rows: Row[]; partial: boolean }>
+  clear(): void // empties statics, closed, missing, titles, objectives, runCreated, lastOpen, backoff; epoch += 1
 }
 // DetailStoreLike = Pick<DetailStore, 'generation' | 'get' | 'put' | 'drop' | 'touch'>
 ```
 
-Pass steps for `rows(host, level, onRows)`. `gen = store?.generation` is captured at the start;
-every `store.put` passes `gen`.
+Pass steps for `rows(host, level, onRows, demand)`.
+
+- **Clear guard:** at pass start, capture `epoch` (the Collector's own counter, bumped by `clear()`)
+  and `gen = store?.generation`. Every `store.put` passes `gen`. After every `await`, if `epoch`
+  changed, the pass stops: it writes nothing to `statics`, `closed`, `missing`, `titles`,
+  `objectives`, `runCreated`, `lastOpen` or `backoff`, calls no more `onRows`, starts no more calls,
+  and returns `{ rows: [], partial: false }` (the scheduler drops it, Task 5). Implement it as one
+  helper `alive()` checked before each map write and before each new call inside `lanes`.
+- **Demand guard (spec edge case "History opened, then closed mid-load"):** `demand` defaults to
+  `() => level`. Before starting each extra call that the level adds beyond `count` (history pages
+  2-5, the level's extra `worker-show`s, `run-list`, `task-list`), check
+  `levelRank(demand()) >= levelRank(level)`; if not, start no more of those calls. Calls already
+  running finish and their results are kept. The count set (active and possibly-open probes) always
+  completes. Do this inside `lanes` by giving each item a `needs: 'count' | 'level'` tag, so a
+  lapsed demand skips the remaining `level` items only.
 
 1. **worker-list:** `worker-list --full --limit 100 [--cursor]` for up to `pagesFor(level)`
    pages, keeping today's loop.
@@ -464,6 +479,13 @@ records calls and returns fixtures built by small helpers (`wl(rows, {hasMore})`
     and no puts go through with the new gen.
 - `partial` is true when `page.hasMore`.
 - `clear()` forgets statics, so the next pass shows again.
+- **Demand lapse:** a history-30 pass on a remote host (lanes 2) with 10 workers to show. After the
+  first 2 shows start, `demand()` returns `{kind:'count'}`. Exactly 2 history `worker-show`s run
+  (their statics are kept), no `task-list`/`run-list` and no further pages start, and the count
+  set's probes still run.
+- **Clear mid-pass:** start a pass whose `worker-show` is a pending promise, call `clear()`, then
+  resolve it. `statics`/`closed` stay empty, `onRows` is not called again, no `store.put` happens,
+  and the pass returns `{ rows: [], partial: false }`.
 
 Commit: `collect: load levels, certified closed proof, short rows first`.
 
@@ -495,7 +517,8 @@ Promise | null, queued: 'force' | 'raise' | null, forced: boolean, passKind: 'ti
   - Queue `'force'` (it overrides a queued `'raise'`), and start now if idle.
   - `forced` clears when that pass settles (success or failure), and `onChange(false)` is called.
 - **Pass:**
-  - `run(host, level, onRows)`. `onRows` updates `host.rows`/`partial` and calls `onChange(true)`.
+  - `run(host, level, onRows, () => this.current())`. `onRows` updates `host.rows`/`partial` and
+    calls `onChange(true)`, unless the pass's epoch is old (see `cancelQueued`).
   - **Success:** set `rows`, `partial`, `loaded = level`, `okAt = now`, `failures = 0`,
     `retryAt = undefined`, `reason = undefined`.
   - **Failure:** `reason = err.message`. For hosts other than `local`:
@@ -516,9 +539,13 @@ Promise | null, queued: 'force' | 'raise' | null, forced: boolean, passKind: 'ti
 - **`rows()`:** concatenates the hosts' rows, in host order.
 - **`hasData()`/`firstData()`:** true/resolve once any host has published rows through `onRows`
   or a pass end. A failed pass with no rows does not count.
-- **`cancelQueued()`:** clear every `queued`, and set `forced = false` on hosts whose forced pass
-  has not started. A forced pass already running is not aborted (its result is dropped by the
-  store generation in Task 4); its `forced` clears when it ends.
+- **`cancelQueued()`** (synchronous):
+  - `epoch += 1`. Each pass captures `epoch` when it starts.
+  - Clear every `queued`, and set `forced = false` on every host.
+  - Set each host's `rows = []`, `partial = false`, `loaded = null`.
+  - A pass already running is not aborted. When it ends with an old epoch, its `onRows` calls and
+    its result are ignored (no rows, `loaded`, `okAt` or backoff change), and the host's next timer
+    is scheduled as normal. No queued pass from before the call can start afterwards.
 - **`stop()`:** clear every timer; no new passes.
 
 Tests (fake `run` returning controllable deferred promises, manual timer queue, injected `now`):
@@ -544,7 +571,10 @@ Tests (fake `run` returning controllable deferred promises, manual timer queue, 
 - **Raise vs backoff:** a raise on a backed-off host does not run before `retryAt`, and the state
   is `stale`, not `loading`.
 - **`firstData`** resolves on the first `onRows` publish.
-- **`cancelQueued`** drops a queued forced pass and clears `forced`.
+- **`cancelQueued`** drops a queued forced pass and clears `forced`. A pass running across
+  `cancelQueued` resolves with rows, and its rows/`okAt`/`loaded` are not applied.
+- **Demand:** the runner's 4th argument returns the live level, then `{kind:'count'}` once 31 s
+  pass without `ask`.
 - **Status `calls`** comes from the callback.
 
 Commit: `schedule: per-host loops, attention levels, force and backoff`.
@@ -564,7 +594,7 @@ Commit: `schedule: per-host loops, attention levels, force and backoff`.
    - `const granted = orca.grantedCapabilities?.includes('storage:own')`.
    - `store = new DetailStore(granted ? orca.storage as StorageLike : null, orca.log)`.
    - `collector = new Collector(cliCall, store)`.
-   - `scheduler = new Scheduler({ run: (h, l, on) => collector.rows(h, l, on), hosts:
+   - `scheduler = new Scheduler({ run: (h, l, on, demand) => collector.rows(h, l, on, demand), hosts:
      async () => { await loadSettings(); return hostList() }, calls: (h) => calls.get(h) ?? 0,
      onChange: publish })`.
    - Then `void store.load().finally(() => scheduler.start())`.
@@ -594,8 +624,13 @@ Commit: `schedule: per-host loops, attention levels, force and backoff`.
        cutoff : range === 'all' })`. This is the explicit unknown-time rule replacing the NaN
        accident.
    - Answer with the same shape as today plus `hostStatus`.
-6. **`graph.clearCache`:** `await store.clear(); collector.clear(); scheduler.cancelQueued();
-   publish(false); return { ok: true }`.
+6. **`graph.clearCache`:** the order matters (the spec drops passes "started or queued before the
+   bump"):
+   `scheduler.cancelQueued(); collector.clear(); const done = store.clear(); publish(false); await
+   done; return { ok: true }`. The first three calls run synchronously before any `await`
+   (`store.clear()` bumps its generation and empties memory before its first await, Task 2), so
+   no old pass can refill memory or storage and no queued pass can start under the new generation
+   with old data.
 7. **`deactivate`:**
    - Async.
    - `scheduler?.stop(); const w = store?.flushNow() ?? Promise.resolve(); killAll();`
@@ -713,7 +748,7 @@ Commit: `schedule: per-host loops, attention levels, force and backoff`.
   | R4b | 7 |
   | R5 | 1 |
   | R6 | 2 (store), 4 (proof, guards, generation), 6 (wiring, grantedCapabilities, deactivate order, clearCache) |
-  | Edge cases | tests in 2, 4, 5 and 7 |
+  | Edge cases | tests in 2, 4 (demand lapse, clear mid-pass), 5 and 7 |
 
 - **Interpretation noted:** "possibly-open" in the Live-run rule means "last probe said open"
   (Task 4, step 7), so `missing` workers don't flood Live. The routine-tick `loading` state is
