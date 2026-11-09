@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { buildRuns, chip, formatDuration, groupProjects, liveRuns, nodeDuration, pathOf, phaseOf, projectLabels, RECENT_MS, toMs, type Row } from './model.ts'
+import { buildRuns, chip, formatDuration, groupProjects, levelRank, liveRuns, nodeDuration, pagesFor, pathOf, phaseOf, projectLabels, RECENT_MS, toMs, type HostStatus, type Row, type Snapshot } from './model.ts'
 
 function row(over: Partial<Row>): Row {
   return {
     id: 'ctx_a', host: 'local', run_id: 'run_1', status: 'completed', creator_dispatch_id: null,
     follow_up_of_dispatch_id: null, created_at: '2026-11-08 10:00:00', completed_at: null, title: 'T',
-    agent: 'pi', model: null, worker_state: 'succeeded', release_state: 'retained',
+    agent: 'pi', model: null, run_created_at: null, details: true, worker_state: 'succeeded', release_state: 'retained',
     terminal_handle: 'term_a', objective: 'Obj', task_id: 'task_a',
     workspace: 'wt1::/home/u/proj-a', ...over
   }
@@ -188,4 +188,83 @@ test('chip tooltip keeps "By project:" and "+N more" when labels are very long',
   assert.ok(t.length <= 256, `length ${t.length}`)
   assert.ok(t.includes('By project:'))
   assert.ok(t.includes('+2 more'))
+})
+
+test('levelRank orders count < live < history 1 < 7 < 30 < 36500; pagesFor', () => {
+  const h = (days: number) => ({ kind: 'history' as const, days })
+  const ranks = [{ kind: 'count' as const }, { kind: 'live' as const }, h(1), h(7), h(30), h(36500)].map(levelRank)
+  assert.deepEqual(ranks, [0, 1, 3, 9, 32, 36502])
+  for (let i = 1; i < ranks.length; i++) assert.ok(ranks[i - 1] < ranks[i])
+  assert.equal(pagesFor({ kind: 'count' }), 1)
+  assert.equal(pagesFor({ kind: 'live' }), 1)
+  assert.equal(pagesFor(h(1)), 1)
+  assert.equal(pagesFor(h(7)), 1)
+  assert.equal(pagesFor(h(30)), 5)
+  assert.equal(pagesFor(h(36500)), 5)
+})
+
+test('detail-less rows build: loading, run.createdAt from run_created_at, deterministic order', () => {
+  const bare = (id: string, over: Partial<Row> = {}) =>
+    row({ id, created_at: '', details: false, run_created_at: '2026-11-08 10:00:00', creator_dispatch_id: null, ...over })
+  const rows = [
+    bare('z_bare'),
+    row({ id: 'known', created_at: '2026-11-08 10:05:00', creator_dispatch_id: null }),
+    bare('a_bare')
+  ]
+  const a = buildRuns(rows, () => false, 0)
+  const b = buildRuns([...rows].reverse(), () => false, 0)
+  assert.deepEqual(a, b)
+  const run = a.runs[0]
+  assert.equal(run.createdAt, '2026-11-08 10:00:00')
+  assert.ok(isFinite(run.lastActivityAt) && run.lastActivityAt > 0)
+  const byId = new Map(run.roots.map((n) => [n.id, n]))
+  assert.equal(byId.get('z_bare')!.loading, true)
+  assert.equal(byId.get('known')!.loading, false)
+  // The row with a known time is folded first; detail-less ones sort after it, ties by id.
+  const bareSolo = buildRuns([bare('b2'), bare('b1')], () => false, 0)
+  assert.deepEqual(bareSolo.runs[0].roots.map((n) => n.id), ['b1', 'b2'])
+  assert.deepEqual(bareSolo.hostStatus, [])
+})
+
+test('liveRuns keeps recently created and recently ended runs', () => {
+  const rows = [
+    row({ id: 'fresh', run_id: 'r_fresh', workspace: 'w::/p/A', status: 'dispatched', created_at: '2026-11-08 10:20:00' }),
+    row({ id: 'endrecent', run_id: 'r_end', workspace: 'w::/p/B', created_at: '2026-11-08 06:00:00', completed_at: '2026-11-08 10:20:00' }),
+    row({ id: 'oldrun', run_id: 'r_old', workspace: 'w::/p/C', created_at: '2026-11-08 06:00:00', completed_at: '2026-11-08 08:00:00' })
+  ]
+  const runs = buildRuns(rows, () => false, 0).runs
+  const fresh = runs.find((r) => r.id === 'r_fresh')!
+  fresh.counts = { running: 0, idle: 0, done: 1, failed: 0 } // created recently, no completion, not live
+  fresh.endedAt = null
+  assert.deepEqual(liveRuns(runs, T('10:30:00')).map((r) => r.id).sort(), ['r_end', 'r_fresh'])
+})
+
+const snapWith = (hostStatus: HostStatus[], rows: Row[] = [row({ status: 'dispatched' })]): Snapshot => ({ ...buildRuns(rows, () => false, 0), hostStatus })
+const hs = (host: string, over: Partial<HostStatus> = {}): HostStatus => ({ host, state: 'ok', partial: false, forced: false, calls: 0, ...over })
+
+test('chip shows ? when every host is error or stale, count plus unreachable when only some are', () => {
+  const all = chip(snapWith([hs('a', { state: 'error', reason: 'boom' }), hs('b', { state: 'stale', reason: 'old' })]))
+  assert.equal(all.text, 'subagents ?')
+  assert.equal(all.tone, 'warning')
+  assert.equal(all.tooltip, 'boom; old')
+  const longReason = chip(snapWith([hs('a', { state: 'error', reason: 'x'.repeat(400) })]))
+  assert.equal(longReason.tooltip!.length, 250)
+  const some = chip(snapWith([hs('a'), hs('b', { state: 'error', reason: 'down' })]))
+  assert.equal(some.text, '1 subagent')
+  assert.match(some.tooltip!, /, 1 host unreachable$/)
+  const two = chip(snapWith([hs('a'), hs('b', { state: 'error' }), hs('c', { state: 'stale' })]))
+  assert.match(two.tooltip!, /, 2 hosts unreachable$/)
+  assert.equal(chip(snapWith([hs('a', { state: 'loading' })])).text, '1 subagent')
+})
+
+test('chip adds (partial) and the suffix survives a long project list within 256 chars', () => {
+  const p = chip(snapWith([hs('a', { partial: true })]))
+  assert.ok(p.tooltip!.endsWith(' (partial)'))
+  const rows = ['a', 'b', 'c', 'd', 'e'].map((x) => row({ id: x, run_id: 'r_' + x, workspace: 'w::/p/' + x.repeat(100), status: 'dispatched' }))
+  const t = chip(snapWith([hs('a', { partial: true }), hs('b', { state: 'error' })], rows)).tooltip!
+  assert.ok(t.length <= 256, `length ${t.length}`)
+  assert.ok(t.endsWith(' (partial), 1 host unreachable'))
+  assert.ok(t.includes('By project:') && t.includes('+2 more'))
+  const noLive = chip(snapWith([hs('a', { partial: true }), hs('b')], [row({})]))
+  assert.deepEqual(noLive, { visible: false })
 })

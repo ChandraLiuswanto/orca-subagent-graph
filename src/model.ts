@@ -20,6 +20,10 @@ export type Row = {
   task_id: string | null
   /** Orca workspace, '<worktreeId>::<absolute path>' (or just a path). */
   workspace: string | null
+  /** Run creation time from `run-list` (`created_at`), when known. */
+  run_created_at: string | null
+  /** True once worker-show details (times, creator, follow-up, agent, model) are known. */
+  details: boolean
 }
 
 /** running: still working. idle: finished, terminal still open. done: finished and closed. */
@@ -39,6 +43,7 @@ export type Node = {
   createdAt: string
   completedAt: string | null
   followUps: number
+  loading: boolean // the node's newest row has details === false
   children: Node[]
 }
 
@@ -79,6 +84,28 @@ export type Snapshot = {
   totals: Record<Phase, number> & { maxDepth: number }
   hosts: string[]
   error?: string
+  hostStatus: HostStatus[] // buildRuns() returns [], worker.ts fills it in
+}
+
+export type HostState = 'ok' | 'loading' | 'stale' | 'error'
+export type HostStatus = {
+  host: string
+  state: HostState
+  reason?: string
+  okAt?: number
+  retryAt?: number
+  partial: boolean
+  forced: boolean
+  calls: number
+}
+
+export type Level = { kind: 'count' } | { kind: 'live' } | { kind: 'history'; days: number }
+/** count < live < history; a history with more days ranks higher. */
+export function levelRank(l: Level): number {
+  return l.kind === 'count' ? 0 : l.kind === 'live' ? 1 : 2 + l.days
+}
+export function pagesFor(l: Level): number {
+  return l.kind === 'history' && l.days > 7 ? 5 : 1
 }
 
 const ACTIVE = new Set(['pending', 'dispatched'])
@@ -108,7 +135,17 @@ export function toMs(s: string | null): number {
  * worker that started its own workers is their parent.
  */
 export function buildRuns(rows: Row[], open: (row: Row) => boolean | undefined = (r) => r.release_state === 'open', now = Date.now()): Snapshot {
-  rows = [...rows].sort((a, b) => toMs(a.created_at) - toMs(b.created_at))
+  // Detail-less rows have no created_at; fall back to the run's time. Unknown sorts last, ties by id.
+  const sortKey = (r: Row) => {
+    const t = toMs(r.created_at)
+    const u = isFinite(t) ? t : toMs(r.run_created_at)
+    return isFinite(u) ? u : Infinity
+  }
+  rows = [...rows].sort((a, b) => {
+    const ka = sortKey(a)
+    const kb = sortKey(b)
+    return ka === kb ? (a.id < b.id ? -1 : a.id > b.id ? 1 : 0) : ka < kb ? -1 : 1
+  })
   const k = (host: string, id: string) => host + '\u0000' + id
   const byId = new Map<string, Row>(rows.map((r) => [k(r.host, r.id), r]))
   const rootOf = (host: string, id: string): string => {
@@ -147,6 +184,7 @@ export function buildRuns(rows: Row[], open: (row: Row) => boolean | undefined =
         createdAt: row.created_at,
         completedAt: row.completed_at,
         followUps: 0,
+        loading: !row.details,
         children: []
       }
       nodes.set(key, node)
@@ -156,6 +194,7 @@ export function buildRuns(rows: Row[], open: (row: Row) => boolean | undefined =
       // Oldest first: the latest follow-up decides the worker's current state.
       node.followUps += 1
       node.phase = phase
+      node.loading = !row.details
       node.status = row.status
       node.completedAt = row.completed_at
       node.terminal = row.terminal_handle ?? node.terminal
@@ -168,7 +207,7 @@ export function buildRuns(rows: Row[], open: (row: Row) => boolean | undefined =
         host: row.host,
         objective: row.objective || row.run_id,
         coordinator: row.host === 'local' ? 'main agent' : `main agent on ${row.host}`,
-        createdAt: row.created_at,
+        createdAt: row.run_created_at || row.created_at,
         counts: zero(),
         roots: [],
         workspace: null,
@@ -190,7 +229,7 @@ export function buildRuns(rows: Row[], open: (row: Row) => boolean | undefined =
     }
     const done = toMs(row.completed_at)
     if (isFinite(done)) run.endedAt = Math.max(run.endedAt ?? done, done)
-    for (const t of [toMs(row.created_at), done]) if (isFinite(t)) run.lastActivityAt = isFinite(run.lastActivityAt) ? Math.max(run.lastActivityAt, t) : t
+    for (const t of [toMs(row.created_at), toMs(row.run_created_at), done]) if (isFinite(t)) run.lastActivityAt = isFinite(run.lastActivityAt) ? Math.max(run.lastActivityAt, t) : t
   }
 
   for (const [key, node] of nodes) {
@@ -216,16 +255,23 @@ export function buildRuns(rows: Row[], open: (row: Row) => boolean | undefined =
   }
 
   const list = [...runs.values()].sort((a, b) => toMs(b.createdAt) - toMs(a.createdAt))
-  return { at: now, runs: list, totals, hosts: [...new Set(rows.map((r) => r.host))] }
+  return { at: now, runs: list, totals, hosts: [...new Set(rows.map((r) => r.host))], hostStatus: [] }
 }
 
 /** The status bar chip: "2 subagents" (running + idle), hidden when there are none. */
 export function chip(s: Snapshot): { visible: boolean; text?: string; tone?: 'neutral' | 'accent' | 'success' | 'warning' | 'danger'; tooltip?: string } {
   const live = s.totals.running + s.totals.idle
+  const bad = s.hostStatus.filter((h) => h.state === 'error' || h.state === 'stale')
+  if (s.hostStatus.length > 0 && bad.length === s.hostStatus.length) {
+    const reasons = s.hostStatus.map((h) => h.reason).filter((r): r is string => !!r)
+    return { visible: true, text: 'subagents ?', tone: 'warning', tooltip: reasons.join('; ').slice(0, 250) }
+  }
   if (s.error && live === 0) return { visible: true, text: 'subagents ?', tone: 'warning', tooltip: s.error.slice(0, 250) }
   if (live === 0) return { visible: false }
   const parts = [`${s.totals.running} running`, `${s.totals.idle} idle`]
   if (s.totals.maxDepth > 1) parts.push(`nested ${s.totals.maxDepth} deep`)
+  const suffix = (s.hostStatus.some((h) => h.partial) ? ' (partial)' : '') + (bad.length ? `, ${bad.length} host${bad.length === 1 ? '' : 's'} unreachable` : '')
+  const budget = 256 - suffix.length
   const head = `Orca workers: ${parts.join(', ')}.`
   const tail = ' Open the Subagents panel for the graph.'
   const busy = groupProjects(s.runs).filter((p) => p.counts.running + p.counts.idle > 0)
@@ -236,13 +282,14 @@ export function chip(s: Snapshot): { visible: boolean; text?: string; tone?: 'ne
   let tooltip = head + byProject((p) => p.label) + tail
   // Too long: drop the closing hint, then ellipsize each label to an equal share so the
   // "By project:" list and its "+N more" suffix always survive.
-  if (tooltip.length > 256) tooltip = head + byProject((p) => p.label)
+  if (tooltip.length > budget) tooltip = head + byProject((p) => p.label)
   if (tooltip.length > 256) {
     const fixed = (head + byProject(() => '')).length
-    const share = Math.max(1, Math.floor((256 - fixed) / shown.length))
+    const share = Math.max(1, Math.floor((budget - fixed) / shown.length))
     tooltip = head + byProject((p) => (p.label.length <= share ? p.label : p.label.slice(0, share - 1) + '…'))
   }
-  if (tooltip.length > 256) tooltip = tooltip.slice(0, 255) + '…'
+  if (tooltip.length > budget) tooltip = tooltip.slice(0, budget - 1) + '…'
+  tooltip += suffix
   return {
     visible: true,
     text: `${live} subagent${live === 1 ? '' : 's'}`,
@@ -261,7 +308,7 @@ const isLive = (r: Run) => r.counts.running + r.counts.idle > 0
  * project. When that is empty, each project's newest run, so Live is never blank.
  */
 export function liveRuns(runs: Run[], now = Date.now()): Run[] {
-  const recent = (r: Run) => (r.endedAt ?? r.lastActivityAt) >= now - RECENT_MS
+  const recent = (r: Run) => toMs(r.createdAt) >= now - RECENT_MS || (r.endedAt ?? -Infinity) >= now - RECENT_MS
   let out = runs.filter((r) => isLive(r) || recent(r))
   if (!out.length) {
     const newest = new Map<string, Run>()
